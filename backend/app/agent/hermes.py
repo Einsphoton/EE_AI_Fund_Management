@@ -538,18 +538,21 @@ def run_agent(
         timeout_sec = int((ai_config or {}).get("timeout") or 180)
     except (TypeError, ValueError):
         timeout_sec = 180
-    # max_tokens：普通模型 2000 够，但 reasoning/thinking 模型（R1、Qwen3-coding、o1 等）
-    # 的 reasoning 本身就会吃掉 3000-8000 token，然后才轮到写 content。
-    # 为了兼容这类模型，默认提高到 8192。用户 DB 里如果显式设了较小值则优先。
-    # 显式 <=0 视为"完全不传"（让服务端/模型自己决定），但不推荐，容易踩 Ollama 默认 2048 坑。
+    # max_tokens：此值同时控制"生成总时长"和"JSON 完整度"，是兼容 Cloudflare 120s
+    # 超时 + reasoning 模型的平衡点。
+    #   - 普通对话模型：1500-2500 token 就够写完整 JSON
+    #   - reasoning 模型（R1/Qwen3-thinking/o1）：reasoning 吃掉 2000-3000，
+    #     加 content 500-1000，总计 3000-4000 是甜点区。
+    #   - 不要随意调到 8000+：Ollama 生成 8000 token 要 150+ 秒，会被 CF 124 超时掐断。
+    # 显式 <=0 视为"完全不传"（让模型/服务端自由发挥，但不推荐经 CF 场景）。
     try:
         raw_mt = (ai_config or {}).get("max_tokens")
         if raw_mt is None or raw_mt == "":
-            max_tokens = 8192
+            max_tokens = 4096
         else:
             max_tokens = int(raw_mt)
     except (TypeError, ValueError):
-        max_tokens = 8192
+        max_tokens = 4096
 
     if not base_url or not api_key:
         result = _heuristic(points, holding)
@@ -566,8 +569,14 @@ def run_agent(
     all_candidates_text = ""       # 用于救援的"所有候选合并文本"
     finish_reason = ""
     successful_source = ""         # 哪个候选解析成功的（content / reasoning_content / ...）
-    # 简单重试 2 次，对付 Ollama 偶发超时
-    for attempt in range(2):
+
+    # 重试策略：
+    # - 网关/超时类错误（524/502/503/504/连接重置/客户端超时）：sleep 后再试，最多 3 次
+    # - JSON 解析失败：立即再试一次（reasoning 模型偶尔会输出不全）
+    # - 业务错误（401/400 等）：不重试
+    import time as _time
+    MAX_ATTEMPTS = 3
+    for attempt in range(MAX_ATTEMPTS):
         try:
             client = _get_openai_client(base_url, api_key, timeout_sec, ai_config)
             messages = build_prompt(
@@ -604,15 +613,34 @@ def run_agent(
                     break
             if parsed:
                 break
-            # 没解析出 JSON：触发重试
+            # 没解析出 JSON：触发重试（但只多试一次，避免 reasoning 模型连续踩同一个坑空耗）
             last_err = (
                 f"JSON 解析失败 (finish_reason={finish_reason}, "
                 f"sources_tried={[c[0] for c in candidates] or 'none'})"
             )
+            if attempt >= 1:
+                # JSON 失败已经重试过一次还不行，认命退出循环
+                break
         except Exception as e:
             last_err = e
-            if attempt == 0:
-                print(f"[hermes] attempt {attempt+1} failed: {e}; will retry")
+            err_str = str(e)
+            # 识别可重试的网关/超时类错误
+            is_retryable = any(t in err_str for t in (
+                "524", "502", "503", "504",                  # CF / Nginx 5xx
+                "TimeoutError", "ReadTimeout", "ConnectError",
+                "Connection reset", "Connection aborted",
+                "origin_response_timeout",
+            ))
+            print(f"[hermes] attempt {attempt+1}/{MAX_ATTEMPTS} failed: {type(e).__name__}: {err_str[:200]} "
+                  f"(retryable={is_retryable})")
+            if not is_retryable:
+                # 业务错误（401/400/模型不存在等）不重试
+                break
+            if attempt + 1 < MAX_ATTEMPTS:
+                # 524 等网关错误一般是后端拥塞，等几秒让队列消化
+                backoff = (attempt + 1) * 5
+                print(f"[hermes] backoff {backoff}s before retry...")
+                _time.sleep(backoff)
             continue
 
     fallback = _heuristic(points, holding)

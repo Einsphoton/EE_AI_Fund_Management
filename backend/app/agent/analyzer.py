@@ -140,11 +140,17 @@ async def analyze_all(batch_id: Optional[str] = None) -> int:
 
 
 def _resolve_concurrency(ai_cfg: dict[str, Any]) -> int:
-    """从 ai 配置中读出并发度，做合法性夹断（1-16）。"""
+    """从 ai 配置中读出并发度，做合法性夹断（1-16）。
+
+    默认 1（串行）：reasoning 模型（R1/Qwen3-thinking 等）单次请求就需要 60-90 秒，
+    且常经 Cloudflare（120s 超时硬限）。并发请求会让后端排队累积，整体反而更慢，
+    并且普遍触发 524 超时。
+    如果你用的是非 reasoning 模型（普通 Chat）+ 内网直连，可以手动调到 4-8。
+    """
     try:
-        n = int((ai_cfg or {}).get("batch_concurrency") or 4)
+        n = int((ai_cfg or {}).get("batch_concurrency") or 1)
     except (TypeError, ValueError):
-        n = 4
+        n = 1
     return max(1, min(16, n))
 
 
