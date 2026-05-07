@@ -9,6 +9,7 @@ import {
 
 import PageHeader from "../components/PageHeader";
 import AssetAnalysisModal from "../components/AssetAnalysisModal";
+import MarkdownView from "../components/MarkdownView";
 import {
   AdviceApi, Assets, Advice as AdviceT,
 } from "../api/client";
@@ -671,7 +672,7 @@ function AdviceRow({ a, nameOf, onAsset }: {
             </span>
           </div>
           <p className="text-sm mt-1 leading-relaxed text-white/90">{a.summary}</p>
-          {a.detail && (
+          {(a.extra?.advice || a.detail) && (
             <>
               <button
                 className="text-[11px] text-muted hover:text-accent-soft mt-1.5 transition"
@@ -680,9 +681,22 @@ function AdviceRow({ a, nameOf, onAsset }: {
                 {showDetail ? "收起详细分析" : "查看详细分析"}
               </button>
               {showDetail && (
-                <pre className="text-[11px] text-muted mt-2 whitespace-pre-wrap bg-bg/40 rounded-lg p-3 border border-line/40">
-                  {a.detail}
-                </pre>
+                <div className="mt-2 bg-bg/40 rounded-lg p-3 border border-line/40 space-y-3">
+                  {a.extra?.advice && (
+                    <div>
+                      <div className="text-[10px] text-accent-soft font-medium mb-1">AI 建议</div>
+                      <MarkdownView content={a.extra.advice} compact />
+                    </div>
+                  )}
+                  {a.detail && (
+                    <details className={a.extra?.advice ? "border-t border-line/30 pt-2" : ""}>
+                      <summary className="text-[10px] text-muted cursor-pointer hover:text-white">
+                        原始分析文本
+                      </summary>
+                      <pre className="text-[11px] text-muted mt-2 whitespace-pre-wrap">{a.detail}</pre>
+                    </details>
+                  )}
+                </div>
               )}
             </>
           )}

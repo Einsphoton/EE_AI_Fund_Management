@@ -100,31 +100,35 @@ SYSTEM_PROMPT = (
     "\n"
     "### 必须返回的 JSON 字段（英文 key，中文值）\n"
     "{\n"
-    '  "action": "buy" | "hold" | "sell",\n'
-    '  "confidence": 0-1 的浮点数,\n'
-    '  "summary": "30 字以内的一句话结论，点明核心动作与理由",\n'
+    '  "action": "buy" 或 "hold" 或 "sell",\n'
+    '  "confidence": 0 到 1 之间的浮点数,\n'
+    '  "summary": "必填；15-40 字的一句话结论，点明核心动作与理由，不能为空",\n'
     '  "score": {\n'
-    '    "technical": 0-100,      // 技术面打分（趋势、均线、动量）\n'
-    '    "fundamental": 0-100,   // 基本面打分（估值、盈利、行业）\n'
-    '    "sentiment": 0-100,     // 情绪/资金面打分\n'
-    '    "risk": 0-100           // 风险打分（越高越危险）\n'
+    '    "technical": 0 到 100 的整数,\n'
+    '    "fundamental": 0 到 100 的整数,\n'
+    '    "sentiment": 0 到 100 的整数,\n'
+    '    "risk": 0 到 100 的整数\n'
     '  },\n'
     '  "fundamentals": "80 字以内：估值、业绩、行业地位等基本面摘要",\n'
     '  "macro": "80 字以内：相关宏观因素（利率、政策、行业周期）",\n'
     '  "micro": "80 字以内：个股/基金特有信号（资金流、基金经理、持仓集中度等）",\n'
-    '  "risks": ["风险点 1", "风险点 2"],        // 2-4 条，每条 20 字内\n'
-    '  "pros":  ["优势点 1", "优势点 2"],        // 2-4 条，每条 20 字内\n'
-    '  "advice": "100 字以内的具体操作建议：仓位、节奏、止盈止损位、触发条件",\n'
-    '  "time_horizon": "short" | "mid" | "long",\n'
-    '  "target_price": 数字或 null,             // 目标价（若适用）\n'
-    '  "stop_loss": 数字或 null                 // 止损位（若适用）\n'
+    '  "risks": ["风险点 1", "风险点 2"],\n'
+    '  "pros":  ["优势点 1", "优势点 2"],\n'
+    '  "advice": "100 字左右的具体操作建议；可以使用 Markdown 语法（**加粗**、列表、> 引用等）；内容分条或分段，包含：仓位、节奏、触发条件、止盈止损",\n'
+    '  "time_horizon": "short" 或 "mid" 或 "long",\n'
+    '  "target_price": 数字或 null,\n'
+    '  "stop_loss": 数字或 null\n'
     "}\n"
     "\n"
-    "注意：\n"
-    "- 若信息不足无法估算 target_price/stop_loss，填 null，不要瞎猜。\n"
-    "- summary 要独立成章（不依赖其他字段即可理解）。\n"
-    "- 所有数值 confidence/score 必须是 0-1 或 0-100 的数字，不要加引号。\n"
-    "- 禁止输出 Markdown 代码块包裹，直接输出裸 JSON。"
+    "### 关键约束（违反会导致解析失败）\n"
+    "- 整个输出必须是可被 JSON.parse 解析的纯 JSON，不要任何解释、不要 Markdown 代码块围栏。\n"
+    "- 禁止在 JSON 里写 // 注释或 /* */ 注释。\n"
+    "- 禁止尾随逗号（最后一个元素后面不要加逗号）。\n"
+    "- 数值字段必须是裸数字，不要写 \"约 3.5\" / \"3.5 元\" / \"3.5%\" 这种带单位/文字的值；不确定就填 null。\n"
+    "- advice 字段的 Markdown 是字符串值的一部分，需要把换行写成 \\n，\" 需要转义成 \\\"，保证 JSON 合法。\n"
+    "- summary 字段必须独立成章、不能为空字符串——否则会被视为分析失败。\n"
+    "- risks / pros 每项 20 字以内，共 2-4 条。\n"
+    "- 若信息不足，target_price / stop_loss 填 null，不要瞎猜。"
 )
 
 
@@ -223,26 +227,133 @@ def _heuristic(points: list[dict], holding: dict) -> dict:
     }
 
 
-def _parse_json(text: str) -> dict | None:
-    """从大模型返回里抽 JSON。兼容 ```json ... ``` 包裹。"""
+def _strip_json_noise(s: str) -> str:
+    """移除 LLM 常见的 JSON 噪声：// 注释、/* */ 注释、尾逗号。"""
+    # 去掉行注释 //...（注意不要误杀字符串里的 //，做简单状态机）
+    out = []
+    i = 0
+    n = len(s)
+    in_str = False
+    escape = False
+    while i < n:
+        c = s[i]
+        if escape:
+            out.append(c); escape = False; i += 1; continue
+        if c == "\\" and in_str:
+            out.append(c); escape = True; i += 1; continue
+        if c == '"':
+            in_str = not in_str
+            out.append(c); i += 1; continue
+        if not in_str:
+            # 行注释
+            if c == "/" and i + 1 < n and s[i + 1] == "/":
+                # 吃到行末
+                while i < n and s[i] != "\n":
+                    i += 1
+                continue
+            # 块注释
+            if c == "/" and i + 1 < n and s[i + 1] == "*":
+                i += 2
+                while i + 1 < n and not (s[i] == "*" and s[i + 1] == "/"):
+                    i += 1
+                i += 2
+                continue
+        out.append(c); i += 1
+    cleaned = "".join(out)
+    # 去尾逗号： , } 或 , ]
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+    return cleaned
+
+
+def _extract_json_block(text: str) -> str | None:
+    """从文本里抽出"最长的合法 JSON 对象"候选。
+
+    支持常见姿势：
+    1. 纯 JSON
+    2. ```json ... ``` 围栏
+    3. 前/后有解释文字的情况
+    4. LLM 被截断的情况：尝试从第一个 { 往后找最后一个可能合法的 }
+    """
     if not text:
         return None
-    # 去掉 markdown 围栏
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
-    # 找第一个 { ... } 块
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
+    t = text.strip()
+    # 去 markdown 围栏
+    t = re.sub(r"^```(?:json|JSON)?\s*", "", t)
+    t = re.sub(r"\s*```$", "", t)
+
+    # 先找第一个 {
+    start = t.find("{")
+    if start < 0:
         return None
+    # 从尾部向前找最后一个 }；如果整块 parse 失败，再逐步收缩
+    end = t.rfind("}")
+    if end < start:
+        return None
+    return t[start:end + 1]
+
+
+def _parse_json(text: str) -> dict | None:
+    """从大模型返回里抽 JSON。兼容围栏、注释、尾逗号、截断等。"""
+    if not text:
+        return None
+    block = _extract_json_block(text)
+    if block is None:
+        return None
+    # 先尝试直接 parse
     try:
-        return json.loads(m.group(0))
+        return json.loads(block)
     except Exception:
-        return None
+        pass
+    # 再尝试去噪
+    try:
+        return json.loads(_strip_json_noise(block))
+    except Exception:
+        pass
+    # 最后尝试：被截断的场景——从 block 末尾向前找最后一个合法的 }
+    cleaned = _strip_json_noise(block)
+    for i in range(len(cleaned), 0, -1):
+        if cleaned[i - 1] != "}":
+            continue
+        try:
+            return json.loads(cleaned[:i])
+        except Exception:
+            continue
+    return None
+
+
+def _salvage_from_text(text: str) -> dict:
+    """JSON 完全解析不出来时的救援：正则抠 summary / advice / action 尽量救回内容。"""
+    rescued: dict[str, Any] = {}
+    if not text:
+        return rescued
+    # 尝试从裸文本里用正则抓字段——LLM 就算吐注释或漏逗号，通常字段本身还是完整的
+    patterns = {
+        "summary": r'"summary"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+        "advice": r'"advice"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+        "action": r'"action"\s*:\s*"([^"]+)"',
+        "fundamentals": r'"fundamentals"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+    }
+    for k, pat in patterns.items():
+        m = re.search(pat, text)
+        if m:
+            val = m.group(1)
+            # 反转义
+            val = val.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+            rescued[k] = val
+    return rescued
 
 
 def _coerce_result(parsed: dict, fallback: dict) -> dict:
     """把解析出的 JSON 规整到固定字段，缺失用 fallback 补。"""
     def _str(v, default=""):
         return str(v) if v is not None else default
+
+    def _nonempty_str(v, default=""):
+        """比 _str 严格：空串/空白也触发 fallback。"""
+        if v is None:
+            return default
+        s = str(v).strip()
+        return s if s else default
 
     def _list_str(v):
         if isinstance(v, list):
@@ -255,6 +366,12 @@ def _coerce_result(parsed: dict, fallback: dict) -> dict:
         try:
             if v is None or v == "":
                 return default
+            # 容忍 "3.5元" / "约 3.5" / "3.5%" 这种带单位/文字的值
+            if isinstance(v, str):
+                m = re.search(r"-?\d+(?:\.\d+)?", v)
+                if not m:
+                    return default
+                return float(m.group(0))
             return float(v)
         except (TypeError, ValueError):
             return default
@@ -269,17 +386,29 @@ def _coerce_result(parsed: dict, fallback: dict) -> dict:
     for k, v in score.items():
         score[k] = max(0, min(100, v))
 
+    advice_text = _str(parsed.get("advice"), "")
+    # summary 兜底策略：parsed.summary → parsed.advice 的前 30 字 → fallback.summary → 固定文案
+    summary = _nonempty_str(parsed.get("summary"))
+    if not summary:
+        if advice_text.strip():
+            # 取 advice 第一行/前 30 字，去掉 Markdown 符号
+            first_line = advice_text.strip().splitlines()[0]
+            first_line = re.sub(r"[#>*`\-\s]+", "", first_line)[:40]
+            summary = first_line or fallback.get("summary", "")
+        if not summary:
+            summary = fallback.get("summary", "") or "分析已完成，详见下方建议。"
+
     return {
         "action": str(parsed.get("action", "hold")).lower(),
         "confidence": max(0.0, min(1.0, float(_num(parsed.get("confidence"), 0.5) or 0.5))),
-        "summary": _str(parsed.get("summary"), fallback.get("summary", "")),
+        "summary": summary,
         "score": score,
         "fundamentals": _str(parsed.get("fundamentals"), ""),
         "macro": _str(parsed.get("macro"), ""),
         "micro": _str(parsed.get("micro"), ""),
         "risks": _list_str(parsed.get("risks")),
         "pros": _list_str(parsed.get("pros")),
-        "advice": _str(parsed.get("advice"), ""),
+        "advice": advice_text,
         "time_horizon": str(parsed.get("time_horizon") or "mid").lower()[:10],
         "target_price": _num(parsed.get("target_price")),
         "stop_loss": _num(parsed.get("stop_loss")),
@@ -303,11 +432,12 @@ def run_agent(
         timeout_sec = int((ai_config or {}).get("timeout") or 180)
     except (TypeError, ValueError):
         timeout_sec = 180
-    # max_tokens：结构化 JSON 用 800 已够；<=0 表示不传
+    # max_tokens：结构化 JSON + Markdown advice 大约需要 1500-2500 token。
+    # <=0 表示完全不传（让服务端/模型自己决定）；默认 2000 给 Markdown 留空间，防截断。
     try:
-        max_tokens = int((ai_config or {}).get("max_tokens") or 0)
+        max_tokens = int((ai_config or {}).get("max_tokens") or 2000)
     except (TypeError, ValueError):
-        max_tokens = 0
+        max_tokens = 2000
 
     if not base_url or not api_key:
         result = _heuristic(points, holding)
@@ -352,12 +482,32 @@ def run_agent(
 
     fallback = _heuristic(points, holding)
     if not parsed:
-        fallback_detail = fallback.pop("detail", "")
+        # 救援：如果原文里能抠出 summary/advice/action，用它们覆盖启发式的占位值，
+        # 让用户至少能看到一部分 LLM 的真实产出，而不是只剩"启发式：MA5=..."。
+        salvaged = _salvage_from_text(text) if text else {}
         err_str = f"{last_err!r}" if last_err else ""
+        if salvaged:
+            # 基于启发式的 score 打底，把救回来的字段塞进去，再走一次 coerce
+            patched = dict(fallback)
+            patched.update(salvaged)
+            coerced = _coerce_result(patched, fallback)
+            detail_parts = [
+                "⚠️ 大模型返回未能完整解析为 JSON，已尝试从原文中救援部分字段。",
+            ]
+            if coerced["advice"]:
+                detail_parts.append(f"【建议】\n{coerced['advice']}")
+            detail_parts.append(f"[错误] {err_str}")
+            detail_parts.append(f"[LLM 原文片段]\n{text[:600]}")
+            return {
+                **coerced,
+                "detail": "\n\n".join(detail_parts),
+                "skill_used": skill_used_label or f"{model}(partial)",
+            }
+        fallback_detail = fallback.pop("detail", "")
         return {
             **fallback,
             "detail": (fallback_detail + f"\n[调用大模型失败] {err_str}"
-                       + (f"\n[LLM 原文片段]\n{text[:400]}" if text else "")),
+                       + (f"\n[LLM 原文片段]\n{text[:600]}" if text else "")),
             "skill_used": skill_used_label or "fallback",
         }
 

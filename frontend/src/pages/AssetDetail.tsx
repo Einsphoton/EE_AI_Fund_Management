@@ -10,6 +10,7 @@ import PriceChart from "../components/PriceChart";
 import FundamentalPanel from "../components/FundamentalPanel";
 import TxnForm, { TxnFormData } from "../components/TxnForm";
 import DcaModal from "../components/DcaModal";
+import AnalysisCard from "../components/AnalysisCard";
 import { Assets as AssetApi, Quotes, AdviceApi, Transaction } from "../api/client";
 import {
   fmtMoney, fmtPct, fmtNum, dateOnly, actionColor, actionLabel,
@@ -271,35 +272,23 @@ export default function AssetDetail() {
             <BrainCircuit className="w-4 h-4 text-accent" /> AI 投资建议
           </h3>
           {latestAdvice ? (
-            <div className="rounded-xl border border-accent/30 bg-accent/5 p-4 mb-4">
-              <div className="flex items-center justify-between">
-                <span className={`text-lg font-semibold ${actionColor(latestAdvice.action)}`}>
-                  {actionLabel(latestAdvice.action)}
-                </span>
-                <span className="text-xs text-muted">置信度 {(latestAdvice.confidence * 100).toFixed(0)}%</span>
-              </div>
-              <p className="text-sm mt-2 leading-relaxed">{latestAdvice.summary}</p>
-              {latestAdvice.detail && (
-                <details className="mt-2">
-                  <summary className="text-xs text-muted cursor-pointer hover:text-white">查看详细分析</summary>
-                  <pre className="text-[11px] text-muted mt-2 whitespace-pre-wrap">{latestAdvice.detail}</pre>
-                </details>
-              )}
-              <div className="text-[10px] text-muted/70 mt-2">
-                {dateOnly(latestAdvice.created_at)} · via {latestAdvice.skill_used}
-              </div>
-            </div>
+            <AnalysisCard advice={latestAdvice} holding={holding} />
           ) : (
             <div className="text-center text-muted py-6 text-sm">尚未生成建议，点击右上方按钮触发分析</div>
           )}
 
-          {(advices.data || []).slice(1, 5).map((a2) => (
-            <div key={a2.id} className="text-xs border-t border-line/50 py-2">
-              <span className={actionColor(a2.action)}>{actionLabel(a2.action)}</span>
-              <span className="text-muted ml-2">{dateOnly(a2.created_at)}</span>
-              <span className="text-muted/80 ml-2 line-clamp-1">{a2.summary}</span>
+          {(advices.data || []).slice(1, 5).length > 0 && (
+            <div className="mt-4 pt-3 border-t border-line/40">
+              <div className="text-[11px] text-muted mb-2">历史建议</div>
+              {(advices.data || []).slice(1, 5).map((a2) => (
+                <div key={a2.id} className="text-xs py-1.5 flex items-center gap-2">
+                  <span className={`shrink-0 font-medium ${actionColor(a2.action)}`}>{actionLabel(a2.action)}</span>
+                  <span className="text-muted shrink-0 font-mono">{dateOnly(a2.created_at)}</span>
+                  <span className="text-muted/80 line-clamp-1">{a2.summary}</span>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
       </div>
 
