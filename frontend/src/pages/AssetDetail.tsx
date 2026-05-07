@@ -309,7 +309,7 @@ export default function AssetDetail() {
         asset={a}
         initial={editingTxn}
         prefill={txnPrefill}
-        onSubmit={(d) => saveTxn.mutateAsync(d)}
+        onSubmit={async (d) => { await saveTxn.mutateAsync(d); }}
       />
 
       <DcaModal
