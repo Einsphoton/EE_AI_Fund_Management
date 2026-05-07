@@ -321,6 +321,112 @@ def _parse_json(text: str) -> dict | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Reasoning 模型兼容：不同厂家把"思考过程"和"最终答案"放在不同字段
+# - OpenAI 标准：message.content（普通模型的全部内容）
+# - DeepSeek-R1 / Qwen3-thinking：message.reasoning_content（思考）+ message.content（答案）
+# - o1 / Kimi 某些版本：message.reasoning（思考）+ message.content（答案）
+# - 部分 Ollama chat template：在 content 里夹 <think>...</think> 标签
+#
+# 实际会踩的坑：
+# - reasoning 模型思考吃光 max_tokens，finish_reason=length，content 是空字符串，
+#   但 reasoning_content / reasoning 字段里反而藏着有用信息（甚至包含最终 JSON）。
+# - 有些模型在 reasoning 结尾会再写一次"Final answer:" 带 JSON，也可能根本没写完。
+#
+# 下面的辅助函数把所有可能的文本源收集起来，由调用方逐一尝试解析。
+# ---------------------------------------------------------------------------
+_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
+
+
+def _strip_think_tags(text: str) -> str:
+    """移除 <think>...</think> 标签（含内部内容）。某些 Ollama chat template 会这样输出。"""
+    if not text:
+        return ""
+    return _THINK_TAG_RE.sub("", text).strip()
+
+
+def _collect_candidate_texts(message: Any, finish_reason: str | None = None) -> list[tuple[str, str]]:
+    """从一条 ChatMessage 里采集所有可能包含最终答案的文本。
+
+    返回 `[(source_label, text), ...]`，按"最可能是最终答案"的优先级排序。
+    调用方应当按顺序对每个候选跑 `_parse_json`，任一成功即可。
+
+    采集的源（按优先级）：
+      1) content 的"去 <think> 后版本"（最常见）
+      2) content 原文（不去 think，防止把 JSON 误伤掉）
+      3) reasoning_content（DeepSeek-R1 / Qwen3 风格）
+      4) reasoning（o1 / Kimi 风格；部分 SDK 会把 reasoning 当 dict）
+      5) 其他 dict-like dump 里的 str 字段（兜底）
+    """
+    candidates: list[tuple[str, str]] = []
+    if message is None:
+        return candidates
+
+    def _push(label: str, text: Any):
+        if not text:
+            return
+        s = str(text).strip()
+        if not s:
+            return
+        # 同一内容不重复（避免 content 和 stripped_content 完全一样时重复尝试）
+        for _, existing in candidates:
+            if existing == s:
+                return
+        candidates.append((label, s))
+
+    content = getattr(message, "content", None) or ""
+
+    # 1) 去掉 <think>...</think> 后的 content
+    stripped = _strip_think_tags(content) if content else ""
+    if stripped and stripped != content:
+        _push("content_after_think", stripped)
+
+    # 2) 原始 content
+    _push("content", content)
+
+    # 3) reasoning_content（DeepSeek / Qwen3）
+    rc = getattr(message, "reasoning_content", None)
+    _push("reasoning_content", rc)
+
+    # 4) reasoning（o1 / Kimi；可能是 str 或 list[dict]）
+    r = getattr(message, "reasoning", None)
+    if isinstance(r, str):
+        _push("reasoning", r)
+    elif isinstance(r, list):
+        # OpenAI o1 风格：list of {"summary": "..."}
+        buf: list[str] = []
+        for item in r:
+            if isinstance(item, dict):
+                for v in item.values():
+                    if isinstance(v, str):
+                        buf.append(v)
+            elif isinstance(item, str):
+                buf.append(item)
+        if buf:
+            _push("reasoning_list", "\n".join(buf))
+    elif isinstance(r, dict):
+        for v in r.values():
+            if isinstance(v, str):
+                _push("reasoning_dict", v)
+
+    # 5) 兜底：用 model_dump 把所有 str 字段都挖出来（小心重复）
+    try:
+        dumped = message.model_dump() if hasattr(message, "model_dump") else {}
+    except Exception:
+        dumped = {}
+    if isinstance(dumped, dict):
+        for k, v in dumped.items():
+            if k in ("content", "reasoning", "reasoning_content", "role", "refusal"):
+                continue
+            if isinstance(v, str) and "{" in v:
+                _push(f"dump_{k}", v)
+
+    return candidates
+
+
+
+
+
 def _salvage_from_text(text: str) -> dict:
     """JSON 完全解析不出来时的救援：正则抠 summary / advice / action 尽量救回内容。"""
     rescued: dict[str, Any] = {}
@@ -432,12 +538,18 @@ def run_agent(
         timeout_sec = int((ai_config or {}).get("timeout") or 180)
     except (TypeError, ValueError):
         timeout_sec = 180
-    # max_tokens：结构化 JSON + Markdown advice 大约需要 1500-2500 token。
-    # <=0 表示完全不传（让服务端/模型自己决定）；默认 2000 给 Markdown 留空间，防截断。
+    # max_tokens：普通模型 2000 够，但 reasoning/thinking 模型（R1、Qwen3-coding、o1 等）
+    # 的 reasoning 本身就会吃掉 3000-8000 token，然后才轮到写 content。
+    # 为了兼容这类模型，默认提高到 8192。用户 DB 里如果显式设了较小值则优先。
+    # 显式 <=0 视为"完全不传"（让服务端/模型自己决定），但不推荐，容易踩 Ollama 默认 2048 坑。
     try:
-        max_tokens = int((ai_config or {}).get("max_tokens") or 2000)
+        raw_mt = (ai_config or {}).get("max_tokens")
+        if raw_mt is None or raw_mt == "":
+            max_tokens = 8192
+        else:
+            max_tokens = int(raw_mt)
     except (TypeError, ValueError):
-        max_tokens = 2000
+        max_tokens = 8192
 
     if not base_url or not api_key:
         result = _heuristic(points, holding)
@@ -450,7 +562,10 @@ def run_agent(
 
     last_err = None
     parsed = None
-    text = ""
+    text = ""                      # 用于救援/调试展示的"主要文本"——通常是 content
+    all_candidates_text = ""       # 用于救援的"所有候选合并文本"
+    finish_reason = ""
+    successful_source = ""         # 哪个候选解析成功的（content / reasoning_content / ...）
     # 简单重试 2 次，对付 Ollama 偶发超时
     for attempt in range(2):
         try:
@@ -468,12 +583,32 @@ def run_agent(
             if max_tokens > 0:
                 kwargs["max_tokens"] = max_tokens
             resp = client.chat.completions.create(**kwargs)
-            text = resp.choices[0].message.content or ""
-            parsed = _parse_json(text)
+            choice = resp.choices[0] if resp.choices else None
+            msg = choice.message if choice else None
+            finish_reason = (getattr(choice, "finish_reason", "") or "") if choice else ""
+            text = (getattr(msg, "content", "") or "") if msg else ""
+
+            # 兼容 reasoning 模型：从 content / reasoning_content / reasoning / <think> 等
+            # 多种字段挨个尝试解析，谁先 parse 成功用谁。
+            candidates = _collect_candidate_texts(msg, finish_reason)
+            all_candidates_text = "\n\n---\n\n".join(
+                f"[{label}]\n{t}" for label, t in candidates
+            )
+            for label, candidate_text in candidates:
+                p = _parse_json(candidate_text)
+                if p:
+                    parsed = p
+                    successful_source = label
+                    # 让"被采纳的那段"作为后续可能展示的 text
+                    text = candidate_text
+                    break
             if parsed:
                 break
-            # JSON 解析失败也算一次失败，触发重试
-            last_err = "JSON 解析失败"
+            # 没解析出 JSON：触发重试
+            last_err = (
+                f"JSON 解析失败 (finish_reason={finish_reason}, "
+                f"sources_tried={[c[0] for c in candidates] or 'none'})"
+            )
         except Exception as e:
             last_err = e
             if attempt == 0:
@@ -482,12 +617,22 @@ def run_agent(
 
     fallback = _heuristic(points, holding)
     if not parsed:
-        # 救援：如果原文里能抠出 summary/advice/action，用它们覆盖启发式的占位值，
-        # 让用户至少能看到一部分 LLM 的真实产出，而不是只剩"启发式：MA5=..."。
-        salvaged = _salvage_from_text(text) if text else {}
+        # 救援：在"所有候选文本的拼接"里用正则抠 summary/advice/action 字段。
+        # 这样即使 LLM 把 JSON 写到 reasoning 里没来得及复制到 content，也有机会救回来。
+        salvage_source = all_candidates_text or text
+        salvaged = _salvage_from_text(salvage_source) if salvage_source else {}
         err_str = f"{last_err!r}" if last_err else ""
+
+        # 诊断提示：reasoning 模型被吃光 token 的经典场景
+        length_hint = ""
+        if finish_reason == "length":
+            length_hint = (
+                "\n[诊断] finish_reason=length，模型因 token 上限被截断。"
+                "若你用的是 reasoning/thinking 模型（如 Qwen3-coding、DeepSeek-R1、o1），"
+                "建议把 AI 设置里的 max_tokens 调高到 8192+，或换一个非 reasoning 模型。"
+            )
+
         if salvaged:
-            # 基于启发式的 score 打底，把救回来的字段塞进去，再走一次 coerce
             patched = dict(fallback)
             patched.update(salvaged)
             coerced = _coerce_result(patched, fallback)
@@ -496,8 +641,8 @@ def run_agent(
             ]
             if coerced["advice"]:
                 detail_parts.append(f"【建议】\n{coerced['advice']}")
-            detail_parts.append(f"[错误] {err_str}")
-            detail_parts.append(f"[LLM 原文片段]\n{text[:600]}")
+            detail_parts.append(f"[错误] {err_str}{length_hint}")
+            detail_parts.append(f"[LLM 原文片段]\n{salvage_source[:800]}")
             return {
                 **coerced,
                 "detail": "\n\n".join(detail_parts),
@@ -506,10 +651,16 @@ def run_agent(
         fallback_detail = fallback.pop("detail", "")
         return {
             **fallback,
-            "detail": (fallback_detail + f"\n[调用大模型失败] {err_str}"
-                       + (f"\n[LLM 原文片段]\n{text[:600]}" if text else "")),
+            "detail": (fallback_detail + f"\n[调用大模型失败] {err_str}{length_hint}"
+                       + (f"\n[LLM 原文片段]\n{salvage_source[:800]}" if salvage_source else "")),
             "skill_used": skill_used_label or "fallback",
         }
+
+    # 成功解析。若来源不是 content 本身，skill_used 里标注一下，方便前端显示"部分解析"
+    if successful_source and successful_source not in ("content", "content_after_think"):
+        skill_used_effective = skill_used_label or f"{model}({successful_source})"
+    else:
+        skill_used_effective = skill_used_label or model
 
     coerced = _coerce_result(parsed, fallback)
     # 生成一段适合折叠展示的 detail（人类可读）
@@ -537,5 +688,5 @@ def run_agent(
     return {
         **coerced,
         "detail": detail_text,
-        "skill_used": skill_used_label or model,
+        "skill_used": skill_used_effective,
     }
