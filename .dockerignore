@@ -1,0 +1,17 @@
+# Don't copy these into Docker build context
+**/node_modules
+**/dist
+**/.venv
+**/.venv-*
+**/venv
+**/__pycache__
+**/*.pyc
+**/.git
+**/.vscode
+**/.idea
+backend/data
+backend/skills_installed
+data
+skills_installed
+*.db
+.DS_Store

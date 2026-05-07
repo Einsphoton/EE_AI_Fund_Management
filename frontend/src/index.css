@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+  background: #0a0e1a;
+  color: #e6ecff;
+}
+
+body {
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1f2a44; border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #2b3a60; }
+
+@layer components {
+  .card {
+    @apply bg-bg-card border border-line rounded-2xl shadow-card;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl
+           text-sm font-medium border border-line bg-bg-soft
+           hover:bg-line/60 transition active:scale-[0.98];
+  }
+  .btn-primary {
+    @apply btn border-accent/40 bg-accent/15 text-accent-soft
+           hover:bg-accent/25 hover:text-white;
+  }
+  .btn-danger {
+    @apply btn border-rose2/40 bg-rose2/10 text-rose2 hover:bg-rose2/20;
+  }
+  .input {
+    @apply w-full px-3 py-2 rounded-lg bg-bg-soft border border-line
+           text-sm placeholder:text-muted/70
+           focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent/60;
+  }
+  .label {
+    @apply text-xs font-medium text-muted mb-1.5 block;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px]
+           font-medium border border-line bg-bg-soft text-muted;
+  }
+  .badge-buy { @apply badge border-emerald2/40 bg-emerald2/10 text-emerald2; }
+  .badge-sell { @apply badge border-rose2/40 bg-rose2/10 text-rose2; }
+  .badge-hold { @apply badge border-amber2/40 bg-amber2/10 text-amber2; }
+}
+
+.glow-divider {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(124, 92, 255, 0.4) 50%,
+    transparent 100%
+  );
+}

@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  ee-fund:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: ee-fund-management
+    restart: unless-stopped
+    ports:
+      - "8888:8000"
+    environment:
+      - TZ=Asia/Shanghai
+      - DATA_DIR=/app/data
+      - SKILLS_DIR=/app/skills_installed
+      # Cloudflare Access Service Token（通过 .env 注入，不要硬编码在此）
+      - CF_ACCESS_CLIENT_ID=${CF_ACCESS_CLIENT_ID:-}
+      - CF_ACCESS_CLIENT_SECRET=${CF_ACCESS_CLIENT_SECRET:-}
+      - CF_ACCESS_HOSTS=${CF_ACCESS_HOSTS:-einsphoton.ren}
+    volumes:
+      - ./data:/app/data
+      - ./skills_installed:/app/skills_installed
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
