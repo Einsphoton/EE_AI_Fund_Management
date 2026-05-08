@@ -158,17 +158,91 @@ def _strip_json_noise(text: str) -> str:
     return text
 
 
-def _safe_parse(text: str) -> dict | None:
-    """尽力解析 JSON。"""
+def _try_repair_truncated_json(text: str) -> str | None:
+    """尽力修复被 max_tokens 截断的 JSON。
+
+    Kimi/Qwen-VL 在 max_tokens 截断时会返回半截 JSON：
+    {... "items": [{"name":"A",...},{"name":"B"   ← 这里没了
+    我们把代码块围栏剥掉、找到最外层 { 后，按括号层级补 ] / }，并把最后一项不完整的对象丢弃。
+
+    仅作为最后兜底，成功返回修补后的字符串；无法修复返回 None。
+    """
+    if not text:
+        return None
+    # 先剥围栏
+    s = _strip_json_noise(text)
+    if not s.startswith("{"):
+        s = s[s.find("{"):] if "{" in s else s
+    if not s:
+        return None
+
+    # 逐字扫描，记录括号层级，遇到字符串内部时跳过
+    in_str = False
+    escape = False
+    stack: list[str] = []
+    last_safe_pos = -1  # 最近一个"完整 item 后的逗号"位置，截断到这里再补闭合
+    for i, ch in enumerate(s):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+        elif ch == "," and len(stack) <= 2:
+            # 在最外层 object 的某个 array 里，遇到逗号 = 一个完整 item 结束
+            last_safe_pos = i
+
+    if not stack:
+        # 已经平衡，但 json.loads 失败 → 可能是其他语法错误，交给上层
+        return s
+
+    # 截到最近一个安全点（如果在数组里），然后补闭合
+    if last_safe_pos > 0:
+        s = s[:last_safe_pos]  # 丢掉最后那个不完整的 item
+
+    # 按 stack 补闭合
+    closer_map = {"{": "}", "[": "]"}
+    while stack:
+        s += closer_map.get(stack.pop(), "")
+
+    return s
+
+
+def _safe_parse(text: str) -> tuple[dict | None, str]:
+    """尽力解析 JSON。
+
+    返回 (parsed_or_None, mode)：
+    - mode = "raw" / "stripped" / "repaired" / "failed"
+    """
+    if not text:
+        return None, "failed"
     try:
-        return json.loads(text)
+        return json.loads(text), "raw"
     except Exception:
         pass
     cleaned = _strip_json_noise(text)
     try:
-        return json.loads(cleaned)
+        return json.loads(cleaned), "stripped"
     except Exception:
-        return None
+        pass
+    # 最后兜底：修复被截断的 JSON
+    repaired = _try_repair_truncated_json(text)
+    if repaired:
+        try:
+            return json.loads(repaired), "repaired"
+        except Exception:
+            pass
+    return None, "failed"
 
 
 def _img_to_data_url(image_bytes: bytes, mime: str = "image/jpeg") -> str:
@@ -213,7 +287,10 @@ async def parse_image(
     client = _build_client(db, cfg)
     data_url = _img_to_data_url(image_bytes, mime)
 
-    user_text = "请识别这张截图里的所有持仓项，按 schema 输出 JSON。"
+    user_text = (
+        "请识别这张截图里的所有持仓项，按 schema 输出 JSON。"
+        " 必须只输出一个合法的 JSON Object，不要任何额外说明。"
+    )
     if platform_hint:
         user_text += f" 提示：这张截图来自「{platform_hint}」。"
 
@@ -228,30 +305,70 @@ async def parse_image(
         },
     ]
 
+    # max_tokens：持仓页可能 5-15 项，每项约 250 tokens，默认提到 8192
+    max_tokens = int(cfg.get("max_tokens", 8192))
+    temperature = cfg.get("temperature", 0.1)
+    model_name = cfg["model"]
+
+    # 是否启用 JSON Mode（response_format=json_object）
+    # Kimi/Moonshot/DeepSeek/Qwen/智谱 GLM 都支持；保险起见做一次降级重试
+    use_json_mode = bool(cfg.get("json_mode", True))
+
     await _log(
         f"已构造 prompt（图片转 base64 共 {len(data_url)//1024} KB）→ 调用 "
-        f"{cfg['model']}（temperature={cfg.get('temperature', 0.1)}, "
-        f"max_tokens={cfg.get('max_tokens', 4096)}）"
+        f"{model_name}（temperature={temperature}, max_tokens={max_tokens}"
+        f"{', json_mode=on' if use_json_mode else ''}）"
     )
 
-    try:
-        resp = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=cfg["model"],
+    async def _call_model(with_json_mode: bool):
+        kwargs: dict = dict(
+            model=model_name,
             messages=messages,
-            temperature=cfg.get("temperature", 0.1),
-            max_tokens=cfg.get("max_tokens", 4096),
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
-        text = (resp.choices[0].message.content or "").strip()
+        if with_json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        return await asyncio.to_thread(client.chat.completions.create, **kwargs)
+
+    try:
+        try:
+            resp = await _call_model(with_json_mode=use_json_mode)
+        except Exception as inner:
+            # response_format 在某些三方代理 / 老模型上不支持 → 降级一次
+            inner_msg = str(inner).lower()
+            if use_json_mode and any(k in inner_msg for k in [
+                "response_format", "response format", "unsupported", "not support",
+                "unknown parameter", "invalid parameter", "json_object",
+            ]):
+                await _log("当前服务端不支持 response_format=json_object，已降级为普通模式重试")
+                resp = await _call_model(with_json_mode=False)
+                use_json_mode = False
+            else:
+                raise
+
+        choice = resp.choices[0]
+        text = (choice.message.content or "").strip()
+        finish_reason = getattr(choice, "finish_reason", None)
         usage = getattr(resp, "usage", None)
+        usage_str = ""
         if usage:
-            await _log(
-                f"模型响应到达，输入 {getattr(usage, 'prompt_tokens', '?')} / "
+            usage_str = (
+                f"输入 {getattr(usage, 'prompt_tokens', '?')} / "
                 f"输出 {getattr(usage, 'completion_tokens', '?')} tokens，"
-                f"原始内容 {len(text)} 字符"
             )
-        else:
-            await _log(f"模型响应到达，原始内容 {len(text)} 字符")
+        await _log(
+            f"模型响应到达，{usage_str}finish_reason={finish_reason}，"
+            f"原始内容 {len(text)} 字符"
+        )
+
+        # 关键：finish_reason=length 说明被 max_tokens 截断 → JSON 大概率不完整
+        truncated = finish_reason == "length"
+        if truncated:
+            await _log(
+                f"⚠️ 响应被 max_tokens={max_tokens} 截断（finish_reason=length），"
+                f"JSON 可能不完整，将尝试修复；建议在『设置 → 视觉模型』把 max_tokens 调大到 12000+"
+            )
     except Exception as e:
         # 详细错误信息：尽量从 OpenAI SDK 异常里挖出 status_code + body
         err_type = type(e).__name__
@@ -297,14 +414,35 @@ async def parse_image(
             "raw_body": body,
         }
 
-    parsed = _safe_parse(text)
+    parsed, parse_mode = _safe_parse(text)
     if not parsed or not isinstance(parsed, dict):
-        await _log("模型返回不是合法 JSON，已尝试剥离围栏后仍失败")
+        # 控制台打印原始响应前 800 字符，方便用户排错
+        print(f"[vision] PARSE_FAIL model={model_name} text_head={text[:800]!r}")
+        await _log(
+            f"模型返回不是合法 JSON（即使尝试剥离围栏 + 截断修复后仍失败）。"
+            f"原始内容前 200 字符：{text[:200]!r}"
+        )
+        # 给出明确的可读错误
+        if truncated:
+            err_msg = (
+                "JSON 解析失败：模型输出被 max_tokens 截断。"
+                f" 请到『设置 → 视觉模型』把 max_tokens 从 {max_tokens} 调大到 12000 以上。"
+            )
+        elif not use_json_mode:
+            err_msg = (
+                "模型返回不是合法 JSON（且服务端不支持 json_object）。"
+                " 建议换用支持 JSON Mode 的模型（Kimi / GLM-4V / Qwen-VL-Max 等）。"
+            )
+        else:
+            err_msg = "模型返回不是合法 JSON。可能是模型对图像理解失败、或输出含大段说明文字。"
         return {
             "platform": "解析失败", "items": [],
-            "error": "模型返回不是合法 JSON",
+            "error": err_msg,
             "raw": text[:500],
         }
+
+    if parse_mode == "repaired":
+        await _log("ℹ️ JSON 通过截断修复成功，最后若干项可能丢失，请人工核对识别结果")
 
     # 兜底字段
     parsed.setdefault("platform", "未知")
@@ -322,7 +460,7 @@ async def parse_image(
             it["asset_type"] = "fund"  # 兜底
             fixed_types += 1
     await _log(
-        f"JSON 解析成功，平台={parsed.get('platform')}，"
+        f"JSON 解析成功（{parse_mode}），平台={parsed.get('platform')}，"
         f"识别到 {len(parsed['items'])} 项"
         + (f"（{fixed_types} 项类型已兜底为 fund）" if fixed_types else "")
     )

@@ -48,7 +48,8 @@ export default function SettingsPage() {
   const [vision, setVision] = useState<NonNullable<AppSettings["vision"]>>({
     use_ai: true,  // 默认复用 AI 大模型，体验最简
     base_url: "", api_key: "", model: "",
-    temperature: 0.1, max_tokens: 4096, timeout: 180, concurrency: 2,
+    temperature: 0.1, max_tokens: 8192, timeout: 180, concurrency: 2,
+    json_mode: true,
   });
   const [schedule, setSchedule] = useState<AppSettings["schedule"]>({ enabled: false, cron: "0 9 * * *", preset: "daily" });
 
@@ -78,9 +79,10 @@ export default function SettingsPage() {
         api_key: data.vision.api_key ?? "",
         model: data.vision.model ?? "",
         temperature: data.vision.temperature ?? 0.1,
-        max_tokens: data.vision.max_tokens ?? 4096,
+        max_tokens: data.vision.max_tokens ?? 8192,
         timeout: data.vision.timeout ?? 180,
         concurrency: data.vision.concurrency ?? 2,
+        json_mode: data.vision.json_mode ?? true,
       });
     }
     setSchedule(data.schedule);
@@ -230,6 +232,27 @@ export default function SettingsPage() {
                   : "若视觉模型也走 Cloudflare Tunnel，请先在 AI 大模型卡片填好 CF Access。"
               }
             />
+            {/* OCR 高级选项：JSON Mode 开关 */}
+            <div className="card mt-3 p-4 text-xs space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox" className="accent-accent w-4 h-4"
+                  checked={vision.json_mode ?? true}
+                  onChange={(e) => setVision({ ...vision, json_mode: e.target.checked })}
+                />
+                <span className="text-sm">强制 JSON 输出模式（推荐开启）</span>
+              </label>
+              <p className="text-muted leading-relaxed">
+                开启后给模型传 <code className="text-white/80">response_format=json_object</code>，
+                让 Kimi / GLM-4V / Qwen-VL / GPT-4o 等强制输出合法 JSON。
+                <strong className="text-white/80">解决"模型返回不是合法 JSON"报错的关键开关。</strong>
+                老模型/三方代理不支持时会自动降级。
+              </p>
+              <p className="text-muted">
+                如果识别 5 项以上时仍报"被截断"，请把上方 <code className="text-white/80">max_tokens</code>
+                调到 <strong className="text-white/80">12000</strong> 以上。
+              </p>
+            </div>
           </div>
         )}
 

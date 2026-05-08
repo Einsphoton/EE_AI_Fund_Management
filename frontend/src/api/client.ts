@@ -218,6 +218,8 @@ export interface AppSettings {
     max_tokens?: number;
     timeout?: number;
     concurrency?: number;
+    /** 强制 JSON Mode（response_format=json_object），Kimi/GLM/Qwen-VL 都支持；不支持时自动降级 */
+    json_mode?: boolean;
   };
   schedule: { enabled: boolean; cron: string; preset: string };
   ui: { currency: string; theme: string };

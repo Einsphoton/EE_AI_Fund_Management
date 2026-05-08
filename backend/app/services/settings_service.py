@@ -64,9 +64,14 @@ DEFAULTS: dict[str, Any] = {
         "api_key": "",
         "model": "",
         "temperature": 0.1,
-        "max_tokens": 4096,
+        # 持仓页 JSON 可能很长（5-15 项 × 每项 ~250 tokens），默认给到 8192；
+        # 复杂截图建议手动调到 12000+，避免被截断导致 JSON 解析失败
+        "max_tokens": 8192,
         "timeout": 180,
         "concurrency": 2,
+        # 是否开启 JSON Mode（response_format=json_object）。
+        # Kimi / Moonshot / GLM-4V / Qwen-VL 都支持；不支持的服务端会自动降级
+        "json_mode": True,
     },
     "schedule": {
         "enabled": False,
