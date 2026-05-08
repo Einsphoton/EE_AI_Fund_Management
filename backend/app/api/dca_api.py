@@ -22,6 +22,6 @@ async def suggest(
     if not asset:
         raise HTTPException(404, "asset not found")
     if asset.asset_type != models.AssetType.fund:
-        raise HTTPException(400, "DCA suggestion only supports OTC fund")
+        raise HTTPException(400, "定投建议目前只支持场外基金 (asset_type=fund)")
     s = await dca_service.suggest(asset.code, base_amount=base, fee_rate=fee_rate)
     return dca_service.to_dict(s)

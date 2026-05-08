@@ -283,12 +283,35 @@ async def fetch_us_stock_kline(code: str, days: int = 365) -> dict[str, Any]:
 
 
 # ---------------- 入口 ----------------
+# 这些资产类型不需要从外部抓行情：现金 / 理财 / 货基 / 债券
+# 它们的"价格"由 Asset 上的 principal_amount + yield_7d/expected_apr 字段给出
+_NO_QUOTE_TYPES = {"cash", "wealth", "money_fund", "bond"}
+
+
+def _synthetic_quote_for_no_quote_asset(asset_type: str) -> dict[str, Any]:
+    """对 cash/wealth/money_fund/bond 返回占位 quote。
+
+    这些类型市值由 holdings.summarize 直接基于 Asset.principal_amount 计算，
+    所以这里返回 current_price=1.0（货基/理财净值=1），points 留空，前端不画图。
+    """
+    return {
+        "name": "",
+        "points": [],
+        "current_price": 1.0,
+        "asset_type": asset_type,
+        "no_quote": True,
+    }
+
+
 async def fetch_quote(asset_type: str, market: str, code: str, days: int = 365) -> dict[str, Any]:
     asset_type = (asset_type or "").lower()
     market = (market or "").upper()
+    if asset_type in _NO_QUOTE_TYPES:
+        return _synthetic_quote_for_no_quote_asset(asset_type)
     try:
         if asset_type == "fund" and market == "OTC":
             return await fetch_fund_nav(code, days)
+        # ETF / 场内基金按其 market 拉 K 线（A/HK/US）
         if market == "A":
             return await fetch_cn_stock_kline(code, days)
         if market == "HK":
@@ -301,7 +324,10 @@ async def fetch_quote(asset_type: str, market: str, code: str, days: int = 365) 
 
 
 async def fetch_current_price(asset_type: str, market: str, code: str) -> float | None:
-    if asset_type == "fund" and market == "OTC":
+    asset_type = (asset_type or "").lower()
+    if asset_type in _NO_QUOTE_TYPES:
+        return 1.0  # 价格恒为 1，市值 = principal_amount
+    if asset_type == "fund" and (market or "").upper() == "OTC":
         v = await fetch_fund_realtime(code)
         if v is not None:
             return v

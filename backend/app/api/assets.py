@@ -19,11 +19,13 @@ def _to_enum(asset_type: str, market: str):
     try:
         a = models.AssetType(asset_type)
     except ValueError:
-        raise HTTPException(400, f"asset_type must be fund/stock, got {asset_type}")
+        valid = "/".join(t.value for t in models.AssetType)
+        raise HTTPException(400, f"asset_type must be one of {valid}, got {asset_type}")
     try:
         m = models.Market(market)
     except ValueError:
-        raise HTTPException(400, f"market must be A/HK/US/OTC, got {market}")
+        valid = "/".join(m.value for m in models.Market)
+        raise HTTPException(400, f"market must be one of {valid}, got {market}")
     return a, m
 
 
@@ -39,6 +41,12 @@ def create_asset(payload: schemas.AssetCreate, db: Session = Depends(get_db)):
         name=payload.name, code=payload.code, asset_type=a, market=m,
         platform=payload.platform, note=payload.note,
         watch_only=payload.watch_only,
+        yield_7d=payload.yield_7d,
+        expected_apr=payload.expected_apr,
+        start_date=payload.start_date,
+        maturity_date=payload.maturity_date,
+        principal_amount=payload.principal_amount,
+        is_principal_guaranteed=payload.is_principal_guaranteed,
     )
     db.add(asset)
     db.flush()
@@ -57,7 +65,7 @@ def create_asset(payload: schemas.AssetCreate, db: Session = Depends(get_db)):
             asset_id=asset.id, txn_type=models.TxnType.buy,
             shares=shares, price=price, amount=amount,
             fee=payload.initial_fee or 0.0,
-            trade_date=payload.initial_date or datetime.utcnow(),
+            trade_date=payload.initial_date or now_local(),
             note="初始买入",
         )
         db.add(txn)
@@ -203,6 +211,12 @@ async def list_holdings(db: Session = Depends(get_db)):
                 "asset_type": asset.asset_type.value, "market": asset.market.value,
                 "platform": asset.platform, "watch_only": asset.watch_only,
                 "note": asset.note,
+                "yield_7d": asset.yield_7d,
+                "expected_apr": asset.expected_apr,
+                "start_date": asset.start_date.isoformat() if asset.start_date else None,
+                "maturity_date": asset.maturity_date.isoformat() if asset.maturity_date else None,
+                "principal_amount": asset.principal_amount,
+                "is_principal_guaranteed": asset.is_principal_guaranteed,
             },
             **h,
         })

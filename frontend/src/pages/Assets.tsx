@@ -7,7 +7,8 @@ import toast from "react-hot-toast";
 import PageHeader from "../components/PageHeader";
 import AssetForm, { AssetFormData } from "../components/AssetForm";
 import AssetAnalysisModal from "../components/AssetAnalysisModal";
-import { Assets as AssetApi, Asset, Holding, Transaction } from "../api/client";
+import { Assets as AssetApi, Asset, AssetType, Holding, Transaction } from "../api/client";
+import { ASSET_TYPE_META } from "../lib/assetMeta";
 import { fmtMoney, fmtPct } from "../lib/format";
 
 export default function Assets() {
@@ -119,12 +120,20 @@ export default function Assets() {
   };
 
   const groups = useMemo(() => {
-    const fund: Holding[] = [];
-    const stock: Holding[] = [];
+    // 按资产类型分组（按 ASSET_TYPE_META.order 排序）
+    const byType: Record<string, Holding[]> = {};
     for (const h of holdings) {
-      (h.asset.asset_type === "fund" ? fund : stock).push(h);
+      const t = h.asset.asset_type || "fund";
+      (byType[t] ||= []).push(h);
     }
-    return { fund, stock };
+    return Object.keys(ASSET_TYPE_META)
+      .sort((a, b) => ASSET_TYPE_META[a as AssetType].order - ASSET_TYPE_META[b as AssetType].order)
+      .filter((t) => byType[t] && byType[t].length > 0)
+      .map((t) => ({
+        type: t as AssetType,
+        meta: ASSET_TYPE_META[t as AssetType],
+        list: byType[t],
+      }));
   }, [holdings]);
 
   const totalsOf = (list: Holding[]) => {
@@ -139,7 +148,7 @@ export default function Assets() {
     <>
       <PageHeader
         title="我的标的"
-        subtitle="基金与股票分组管理；支持仅观察未买入"
+        subtitle="基金 / 股票 / 理财 / 现金等多类资产分组管理"
         actions={
           <button
             className="btn-primary"
@@ -150,37 +159,30 @@ export default function Assets() {
         }
       />
 
-      <Section
-        title="场外基金"
-        icon={<Wallet className="w-4 h-4 text-accent" />}
-        list={groups.fund}
-        totals={totalsOf(groups.fund)}
-        onEdit={openEdit}
-        onAnalyze={(a) => setAnalyzingId(a.id)}
-        onDelete={(a) => {
-          if (confirm(`确认删除 ${a.name}? 所有交易记录会一并删除。`)) {
-            remove.mutate(a.id);
-          }
-        }}
-        emptyText="还没有场外基金，点右上角「添加标的」开始"
-      />
+      {groups.length === 0 && (
+        <div className="card p-10 text-center text-muted">
+          还没有任何资产，点右上角「添加标的」开始
+        </div>
+      )}
 
-      <div className="h-6" />
-
-      <Section
-        title="股票 / 场内基金"
-        icon={<LineChart className="w-4 h-4 text-emerald2" />}
-        list={groups.stock}
-        totals={totalsOf(groups.stock)}
-        onEdit={openEdit}
-        onAnalyze={(a) => setAnalyzingId(a.id)}
-        onDelete={(a) => {
-          if (confirm(`确认删除 ${a.name}? 所有交易记录会一并删除。`)) {
-            remove.mutate(a.id);
-          }
-        }}
-        emptyText="还没有股票/场内 ETF，点右上角「添加标的」开始"
-      />
+      {groups.map((g, i) => (
+        <div key={g.type} className={i > 0 ? "mt-6" : ""}>
+          <Section
+            title={g.meta.label}
+            icon={<Wallet className="w-4 h-4 text-accent" />}
+            list={g.list}
+            totals={totalsOf(g.list)}
+            onEdit={openEdit}
+            onAnalyze={(a) => setAnalyzingId(a.id)}
+            onDelete={(a) => {
+              if (confirm(`确认删除 ${a.name}? 所有交易记录会一并删除。`)) {
+                remove.mutate(a.id);
+              }
+            }}
+            emptyText=""
+          />
+        </div>
+      ))}
 
       <AssetForm
         open={open}

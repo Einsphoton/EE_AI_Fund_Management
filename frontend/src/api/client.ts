@@ -18,8 +18,8 @@ api.interceptors.response.use(
 );
 
 // ---------- types ----------
-export type AssetType = "fund" | "stock";
-export type Market = "A" | "HK" | "US" | "OTC";
+export type AssetType = "fund" | "stock" | "etf" | "money_fund" | "wealth" | "cash" | "bond";
+export type Market = "A" | "HK" | "US" | "OTC" | "CNY" | "USD" | "HKD";
 export type TxnType = "buy" | "sell";
 
 export interface Asset {
@@ -31,6 +31,13 @@ export interface Asset {
   platform: string;
   note: string;
   watch_only: boolean;
+  // 理财/货基/现金/债券扩展字段
+  yield_7d?: number | null;
+  expected_apr?: number | null;
+  start_date?: string | null;
+  maturity_date?: string | null;
+  principal_amount?: number | null;
+  is_principal_guaranteed?: boolean;
   created_at: string;
   updated_at: string;
 }

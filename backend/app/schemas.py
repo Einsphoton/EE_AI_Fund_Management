@@ -10,11 +10,18 @@ from pydantic import BaseModel, Field, ConfigDict
 class AssetBase(BaseModel):
     name: str
     code: str
-    asset_type: str = Field(..., description="fund | stock")
-    market: str = Field("OTC", description="A | HK | US | OTC")
+    asset_type: str = Field(..., description="fund | stock | etf | money_fund | wealth | cash | bond")
+    market: str = Field("OTC", description="A | HK | US | OTC | CNY | USD | HKD")
     platform: str = ""
     note: str = ""
     watch_only: bool = False
+    # 理财/货基/现金/债券扩展字段（fund/stock 类型留空即可）
+    yield_7d: float | None = None
+    expected_apr: float | None = None
+    start_date: datetime | None = None
+    maturity_date: datetime | None = None
+    principal_amount: float | None = None
+    is_principal_guaranteed: bool = True
 
 
 class AssetCreate(AssetBase):
@@ -33,6 +40,12 @@ class AssetUpdate(BaseModel):
     platform: str | None = None
     note: str | None = None
     watch_only: bool | None = None
+    yield_7d: float | None = None
+    expected_apr: float | None = None
+    start_date: datetime | None = None
+    maturity_date: datetime | None = None
+    principal_amount: float | None = None
+    is_principal_guaranteed: bool | None = None
 
 
 class AssetOut(AssetBase):
