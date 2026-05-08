@@ -44,6 +44,10 @@ export default function SettingsPage() {
     cf_access_hosts: "",
   });
   const [schedule, setSchedule] = useState<AppSettings["schedule"]>({ enabled: false, cron: "0 9 * * *", preset: "daily" });
+  const [vision, setVision] = useState<NonNullable<AppSettings["vision"]>>({
+    base_url: "", api_key: "", model: "",
+    temperature: 0.1, max_tokens: 4096, timeout: 180, concurrency: 2,
+  });
   const [showCfAdvanced, setShowCfAdvanced] = useState(false);
 
   const [testing, setTesting] = useState(false);
@@ -73,6 +77,17 @@ export default function SettingsPage() {
       cf_access_hosts: data.ai.cf_access_hosts ?? "",
     });
     setSchedule(data.schedule);
+    if (data.vision) {
+      setVision({
+        base_url: data.vision.base_url ?? "",
+        api_key: data.vision.api_key ?? "",
+        model: data.vision.model ?? "",
+        temperature: data.vision.temperature ?? 0.1,
+        max_tokens: data.vision.max_tokens ?? 4096,
+        timeout: data.vision.timeout ?? 180,
+        concurrency: data.vision.concurrency ?? 2,
+      });
+    }
     // 如果已经配置过 CF，默认展开高级区块
     if (data.ai.cf_access_client_id) setShowCfAdvanced(true);
   }, [data]);
@@ -81,6 +96,7 @@ export default function SettingsPage() {
     mutationFn: async () => {
       await SettingsApi.put("ai", ai);
       await SettingsApi.put("schedule", schedule);
+      await SettingsApi.put("vision", vision);
     },
     onSuccess: () => {
       toast.success("配置已保存并生效");
@@ -363,6 +379,51 @@ export default function SettingsPage() {
               )}
             </div>
           )}
+        </div>
+
+        <div className="card p-5">
+          <h3 className="font-semibold mb-1 flex items-center gap-2">
+            <Zap className="w-4 h-4 text-accent" />
+            视觉模型（OCR 截图导入）
+          </h3>
+          <p className="text-xs text-muted mb-4">
+            用于「OCR 导入」页识别持仓截图。推荐：阿里 <code>qwen-vl-max</code>、智谱 <code>glm-4v</code>、OpenAI <code>gpt-4o</code>。
+            留空表示未启用 OCR 功能。
+          </p>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2">
+              <label className="label">Base URL</label>
+              <input className="input" placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1"
+                     value={vision.base_url}
+                     onChange={(e) => setVision({ ...vision, base_url: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Model</label>
+              <input className="input" placeholder="如 qwen-vl-max / glm-4v / gpt-4o"
+                     value={vision.model}
+                     onChange={(e) => setVision({ ...vision, model: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">API Key</label>
+              <input className="input" type="password" placeholder="sk-..."
+                     value={vision.api_key}
+                     onChange={(e) => setVision({ ...vision, api_key: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Max Tokens</label>
+              <input className="input" type="number" min={512} max={16384} step={256}
+                     value={vision.max_tokens ?? 4096}
+                     onChange={(e) => setVision({ ...vision, max_tokens: e.target.valueAsNumber || 4096 })} />
+            </div>
+            <div>
+              <label className="label">并发度</label>
+              <input className="input" type="number" min={1} max={5}
+                     value={vision.concurrency ?? 2}
+                     onChange={(e) => setVision({ ...vision, concurrency: e.target.valueAsNumber || 2 })} />
+              <div className="text-[10px] text-muted mt-1">视觉模型计费贵，建议 1-2</div>
+            </div>
+          </div>
         </div>
 
         <div className="card p-5">

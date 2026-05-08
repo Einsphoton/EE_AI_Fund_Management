@@ -40,6 +40,21 @@ DEFAULTS: dict[str, Any] = {
         # 默认为空 = 只要配置了 Client Id/Secret，对所有请求都注入
         "cf_access_hosts": "",
     },
+    "vision": {
+        # 多模态视觉模型，用于截图 OCR 解析持仓页。
+        # 留空 base_url/api_key 表示未配置 → 前端会引导用户去填。
+        # 推荐：阿里通义 qwen-vl-max（中文金融 App 截图识别非常准）
+        # 备选：智谱 GLM-4V / OpenAI gpt-4o / 本地 Ollama qwen2.5-vl
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+        "temperature": 0.1,
+        # 单图 token 上限（视觉模型 token 计数包含图片，4096 足够）
+        "max_tokens": 4096,
+        "timeout": 180,
+        # OCR 批量处理的并发度（视觉模型计费贵，建议 1-2）
+        "concurrency": 2,
+    },
     "schedule": {
         "enabled": False,
         "cron": "0 9 * * *",      # 每天 9:00

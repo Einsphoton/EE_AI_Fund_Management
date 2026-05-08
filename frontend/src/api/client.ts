@@ -201,6 +201,16 @@ export interface AppSettings {
     cf_access_client_secret?: string;
     cf_access_hosts?: string;
   };
+  /** 多模态视觉模型（用于 OCR 截图导入） */
+  vision?: {
+    base_url: string;
+    api_key: string;
+    model: string;
+    temperature?: number;
+    max_tokens?: number;
+    timeout?: number;
+    concurrency?: number;
+  };
   schedule: { enabled: boolean; cron: string; preset: string };
   ui: { currency: string; theme: string };
 }
@@ -393,3 +403,92 @@ export async function chatStream(
     }
   }
 }
+
+// =================== OCR 批量导入 ===================
+
+export interface OcrCandidate {
+  asset_id: number;
+  name: string;
+  code: string;
+  asset_type: AssetType;
+  platform: string;
+  match_score: number;
+}
+
+export interface OcrSuggestion {
+  action: "create" | "append_buy" | "append_sell" | "skip" | "update_field";
+  delta_shares?: number;
+  delta_amount?: number;
+  reason: string;
+}
+
+export interface OcrItem {
+  name: string | null;
+  code: string | null;
+  asset_type: AssetType;
+  shares: number | null;
+  amount: number | null;
+  avg_cost: number | null;
+  current_price: number | null;
+  market_value: number | null;
+  profit: number | null;
+  profit_pct: number | null;
+  yield_7d: number | null;
+  expected_apr: number | null;
+  maturity_date: string | null;
+  raw_text?: string;
+  _candidates?: OcrCandidate[];
+  _suggestion?: OcrSuggestion;
+}
+
+export interface OcrParseResult {
+  file: string;
+  platform: string;
+  screenshot_date: string | null;
+  items: OcrItem[];
+  error?: string;
+}
+
+export interface OcrCommitItem {
+  action: "create" | "append_buy" | "append_sell" | "update_field" | "skip";
+  asset_id?: number | null;
+  name?: string;
+  code?: string;
+  asset_type?: AssetType;
+  market?: Market;
+  platform?: string;
+  note?: string;
+  yield_7d?: number | null;
+  expected_apr?: number | null;
+  start_date?: string | null;
+  maturity_date?: string | null;
+  principal_amount?: number | null;
+  is_principal_guaranteed?: boolean;
+  shares?: number | null;
+  delta_shares?: number | null;
+  delta_amount?: number | null;
+  avg_cost?: number | null;
+  current_price?: number | null;
+  market_value?: number | null;
+  profit?: number | null;
+  profit_pct?: number | null;
+  snapshot_date?: string | null;
+  raw?: unknown;
+}
+
+export const ImportApi = {
+  parse: async (files: File[], platformHint = ""): Promise<{ results: OcrParseResult[]; total: number }> => {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    if (platformHint) fd.append("platform_hint", platformHint);
+    const r = await api.post("/import/ocr/parse", fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 600_000, // 视觉模型可能慢，10 分钟
+    });
+    return r.data;
+  },
+  commit: async (items: OcrCommitItem[]): Promise<{ created: number; appended: number; skipped: number; errors: string[] }> => {
+    const r = await api.post("/import/ocr/commit", { items }, { timeout: 60_000 });
+    return r.data;
+  },
+};

@@ -34,6 +34,7 @@ from .api import skills_api
 from .api import advice_api
 from .api import dca_api
 from .api import chat_api
+from .api import import_api
 
 
 @asynccontextmanager
@@ -85,6 +86,7 @@ app.include_router(skills_api.router)
 app.include_router(advice_api.router)
 app.include_router(dca_api.router)
 app.include_router(chat_api.router)
+app.include_router(import_api.router)
 
 
 @app.get("/api/health")

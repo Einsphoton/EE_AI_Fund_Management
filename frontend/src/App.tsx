@@ -1,6 +1,6 @@
 import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, Wallet, Boxes, Sparkles, Settings as Cog, BrainCircuit, MessageSquare,
+  LayoutDashboard, Wallet, Boxes, Sparkles, Settings as Cog, BrainCircuit, MessageSquare, Camera,
 } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
 import Assets from "./pages/Assets";
@@ -9,12 +9,14 @@ import SkillMarket from "./pages/SkillMarket";
 import SettingsPage from "./pages/Settings";
 import Advice from "./pages/Advice";
 import AIChat from "./pages/AIChat";
+import ImportOcr from "./pages/ImportOcr";
 import { AnalysisTaskProvider } from "./lib/analysisTask";
 import AnalysisTaskIndicator from "./components/AnalysisTaskIndicator";
 
 const NAV = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard, end: true },
   { to: "/assets", label: "我的标的", icon: Wallet },
+  { to: "/import", label: "OCR 导入", icon: Camera },
   { to: "/chat", label: "AI Chat", icon: MessageSquare },
   { to: "/advice", label: "AI 建议", icon: BrainCircuit },
   { to: "/skills", label: "Skill 市场", icon: Boxes },
@@ -66,6 +68,7 @@ export default function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/assets" element={<Assets />} />
               <Route path="/assets/:id" element={<AssetDetail />} />
+              <Route path="/import" element={<ImportOcr />} />
               <Route path="/chat" element={<AIChat />} />
               <Route path="/advice" element={<Advice />} />
               <Route path="/skills" element={<SkillMarket />} />
