@@ -672,7 +672,7 @@ function AdviceRow({ a, nameOf, onAsset }: {
             </span>
           </div>
           <p className="text-sm mt-1 leading-relaxed text-white/90">{a.summary}</p>
-          {(a.extra?.advice || a.detail) && (
+          {(a.extra?.commentary || a.extra?.advice || a.detail) && (
             <>
               <button
                 className="text-[11px] text-muted hover:text-accent-soft mt-1.5 transition"
@@ -682,14 +682,20 @@ function AdviceRow({ a, nameOf, onAsset }: {
               </button>
               {showDetail && (
                 <div className="mt-2 bg-bg/40 rounded-lg p-3 border border-line/40 space-y-3">
-                  {a.extra?.advice && (
+                  {a.extra?.commentary && (
                     <div>
-                      <div className="text-[10px] text-accent-soft font-medium mb-1">AI 建议</div>
+                      <div className="text-[10px] text-accent font-medium mb-1">AI 深度点评</div>
+                      <MarkdownView content={a.extra.commentary} compact />
+                    </div>
+                  )}
+                  {a.extra?.advice && (
+                    <div className={a.extra?.commentary ? "border-t border-line/30 pt-2" : ""}>
+                      <div className="text-[10px] text-emerald2 font-medium mb-1">操作清单</div>
                       <MarkdownView content={a.extra.advice} compact />
                     </div>
                   )}
                   {a.detail && (
-                    <details className={a.extra?.advice ? "border-t border-line/30 pt-2" : ""}>
+                    <details className={(a.extra?.advice || a.extra?.commentary) ? "border-t border-line/30 pt-2" : ""}>
                       <summary className="text-[10px] text-muted cursor-pointer hover:text-white">
                         原始分析文本
                       </summary>

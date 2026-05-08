@@ -114,19 +114,32 @@ SYSTEM_PROMPT = (
     '  "micro": "80 字以内：个股/基金特有信号（资金流、基金经理、持仓集中度等）",\n'
     '  "risks": ["风险点 1", "风险点 2"],\n'
     '  "pros":  ["优势点 1", "优势点 2"],\n'
-    '  "advice": "100 字左右的具体操作建议；可以使用 Markdown 语法（**加粗**、列表、> 引用等）；内容分条或分段，包含：仓位、节奏、触发条件、止盈止损",\n'
+    '  "advice": "60-100 字的【操作清单】，要短、要可执行，Markdown 列表形式：仓位/节奏/触发条件/止盈止损",\n'
+    '  "commentary": "【最重要的字段】250-450 字的【AI 深度点评】，纯 Markdown，自由发挥；要像一个有观点、有性格的专业分析师在跟用户聊天，而不是机械地填表",\n'
     '  "time_horizon": "short" 或 "mid" 或 "long",\n'
     '  "target_price": 数字或 null,\n'
     '  "stop_loss": 数字或 null\n'
     "}\n"
+    "\n"
+    "### commentary 字段写作要求（这是用户最看重的部分，请认真写）\n"
+    "你必须把 commentary 写得像一个真人分析师的微信长消息，而不是教科书式的描述。包含但不限于：\n"
+    "1. **当前形势的主观判断**：你怎么看现在这个标的？是在筑底、突破、还是顶部震荡？为什么？\n"
+    "2. **关键矛盾点**：让你买/卖犹豫的因素是什么？多空双方各自的逻辑？\n"
+    "3. **针对用户持仓的个性化看法**：用户已浮盈/浮亏多少，目前情绪可能怎样，你建议怎么应对？\n"
+    "4. **可能的剧本**：未来 1-3 个月最可能/次可能的两种走势，分别该怎么做？\n"
+    "5. **诚实的不确定性**：哪些信息你不知道、不确定，需要用户自己跟踪？\n"
+    "\n"
+    "可以使用 Markdown：**加粗** 关键词、`> 引用` 表达个人态度、用 `-` 列要点、用 `## 小标题` 分段。\n"
+    "语气要有判断力、有温度，避免「建议关注、值得留意」这种万金油废话。可以适度直白，例如：『我个人不建议现在追』『如果是我会先止盈一半』。\n"
     "\n"
     "### 关键约束（违反会导致解析失败）\n"
     "- 整个输出必须是可被 JSON.parse 解析的纯 JSON，不要任何解释、不要 Markdown 代码块围栏。\n"
     "- 禁止在 JSON 里写 // 注释或 /* */ 注释。\n"
     "- 禁止尾随逗号（最后一个元素后面不要加逗号）。\n"
     "- 数值字段必须是裸数字，不要写 \"约 3.5\" / \"3.5 元\" / \"3.5%\" 这种带单位/文字的值；不确定就填 null。\n"
-    "- advice 字段的 Markdown 是字符串值的一部分，需要把换行写成 \\n，\" 需要转义成 \\\"，保证 JSON 合法。\n"
+    "- advice 和 commentary 字段里的 Markdown 是字符串值的一部分，换行写成 \\n，\" 转义成 \\\"，保证 JSON 合法。\n"
     "- summary 字段必须独立成章、不能为空字符串——否则会被视为分析失败。\n"
+    "- commentary 不能为空且不能少于 150 字——它是这次分析的核心交付物。\n"
     "- risks / pros 每项 20 字以内，共 2-4 条。\n"
     "- 若信息不足，target_price / stop_loss 填 null，不要瞎猜。"
 )
@@ -193,6 +206,7 @@ def _heuristic(points: list[dict], holding: dict) -> dict:
         "summary": "暂无足够行情数据，建议观察。",
         "fundamentals": "", "macro": "", "micro": "",
         "risks": [], "pros": [], "advice": "等待数据或手动触发分析。",
+        "commentary": "",
         "time_horizon": "mid",
         "target_price": None, "stop_loss": None,
         "score": {"technical": 50, "fundamental": 50, "sentiment": 50, "risk": 50},
@@ -436,6 +450,7 @@ def _salvage_from_text(text: str) -> dict:
     patterns = {
         "summary": r'"summary"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
         "advice": r'"advice"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+        "commentary": r'"commentary"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
         "action": r'"action"\s*:\s*"([^"]+)"',
         "fundamentals": r'"fundamentals"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
     }
@@ -515,6 +530,7 @@ def _coerce_result(parsed: dict, fallback: dict) -> dict:
         "risks": _list_str(parsed.get("risks")),
         "pros": _list_str(parsed.get("pros")),
         "advice": advice_text,
+        "commentary": _str(parsed.get("commentary"), ""),
         "time_horizon": str(parsed.get("time_horizon") or "mid").lower()[:10],
         "target_price": _num(parsed.get("target_price")),
         "stop_loss": _num(parsed.get("stop_loss")),
@@ -619,6 +635,13 @@ def run_agent(
                     successful_source = label
                     # 让"被采纳的那段"作为后续可能展示的 text
                     text = candidate_text
+                    # 诊断日志：LLM 实际返回了哪些字段 + commentary 长度
+                    comm_len = len(str(p.get("commentary") or ""))
+                    adv_len = len(str(p.get("advice") or ""))
+                    print(
+                        f"[hermes] parsed ok from '{label}' finish={finish_reason} "
+                        f"keys={sorted(p.keys())} commentary_len={comm_len} advice_len={adv_len}"
+                    )
                     break
             if parsed:
                 break
@@ -676,8 +699,10 @@ def run_agent(
             detail_parts = [
                 "⚠️ 大模型返回未能完整解析为 JSON，已尝试从原文中救援部分字段。",
             ]
+            if coerced.get("commentary"):
+                detail_parts.append(f"【AI 深度点评】\n{coerced['commentary']}")
             if coerced["advice"]:
-                detail_parts.append(f"【建议】\n{coerced['advice']}")
+                detail_parts.append(f"【操作建议】\n{coerced['advice']}")
             detail_parts.append(f"[错误] {err_str}{length_hint}")
             detail_parts.append(f"[LLM 原文片段]\n{salvage_source[:800]}")
             return {
@@ -702,6 +727,8 @@ def run_agent(
     coerced = _coerce_result(parsed, fallback)
     # 生成一段适合折叠展示的 detail（人类可读）
     detail_parts = []
+    if coerced.get("commentary"):
+        detail_parts.append(f"【AI 深度点评】\n{coerced['commentary']}")
     if coerced["fundamentals"]:
         detail_parts.append(f"【基本面】{coerced['fundamentals']}")
     if coerced["macro"]:
@@ -713,7 +740,7 @@ def run_agent(
     if coerced["risks"]:
         detail_parts.append("【风险】\n- " + "\n- ".join(coerced["risks"]))
     if coerced["advice"]:
-        detail_parts.append(f"【建议】{coerced['advice']}")
+        detail_parts.append(f"【操作建议】{coerced['advice']}")
     if coerced["target_price"] is not None or coerced["stop_loss"] is not None:
         tp = coerced["target_price"]
         sl = coerced["stop_loss"]

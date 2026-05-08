@@ -65,7 +65,7 @@ async def _analyze_one_core(
     )
 
     extra_keys = ("score", "fundamentals", "macro", "micro", "risks", "pros",
-                  "advice", "time_horizon", "target_price", "stop_loss")
+                  "advice", "commentary", "time_horizon", "target_price", "stop_loss")
     extra = {k: result.get(k) for k in extra_keys if k in result}
     advice = models.Advice(
         asset_id=asset.id,

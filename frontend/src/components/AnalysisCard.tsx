@@ -4,14 +4,15 @@
  * 视觉结构：
  *   1. 顶部结论条（action + confidence + time_horizon + summary + target/stop）
  *   2. 四维评分（technical / fundamental / sentiment / risk）
- *   3. 基本面 / 宏观 / 微观 三栏洞察
- *   4. 优势 / 风险 双栏
- *   5. 操作建议（Markdown 渲染，AI 主观建议）
- *   6. 兜底：解析失败时展示原始 detail
+ *   3. 【AI 深度点评】 commentary —— 主观长文，最突出
+ *   4. 基本面 / 宏观 / 微观 三栏洞察
+ *   5. 优势 / 风险 双栏
+ *   6. 操作建议（advice 短清单）
+ *   7. 兜底：解析失败时展示原始 detail
  */
 import {
   Sparkles, TrendingUp, TrendingDown, Minus, Shield, AlertTriangle,
-  Target, Zap, Clock, Activity, Gauge,
+  Target, Zap, Clock, Activity, Gauge, MessageSquareQuote,
 } from "lucide-react";
 import type { Advice, Holding } from "../api/client";
 import { fmtNum, fmtPct, actionColor, actionLabel, fmtDateTime } from "../lib/format";
@@ -134,7 +135,25 @@ export default function AnalysisCard({ advice, holding }: Props) {
         </div>
       )}
 
-      {/* ===== 3. 基本面 / 宏观 / 微观 ===== */}
+      {/* ===== 3. AI 深度点评（commentary，主观长文，最显眼）===== */}
+      {extra.commentary && (
+        <div className="rounded-2xl border-2 border-accent/40 bg-gradient-to-br from-accent/15 via-accent/5 to-bg-soft/30 p-5 shadow-lg shadow-accent/10">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-8 h-8 rounded-lg bg-accent/20 border border-accent/40 flex items-center justify-center">
+              <MessageSquareQuote className="w-4 h-4 text-accent" />
+            </div>
+            <div className="flex-1">
+              <div className="text-base font-semibold text-white">AI 深度点评</div>
+              <div className="text-[11px] text-muted">分析师主观视角，自由发挥的判断与态度</div>
+            </div>
+          </div>
+          <div className="pl-1">
+            <MarkdownView content={extra.commentary} />
+          </div>
+        </div>
+      )}
+
+      {/* ===== 4. 基本面 / 宏观 / 微观 ===== */}
       <div className="grid md:grid-cols-3 gap-3">
         <InsightCard
           icon={<Sparkles className="w-4 h-4" />}
@@ -156,7 +175,7 @@ export default function AnalysisCard({ advice, holding }: Props) {
         />
       </div>
 
-      {/* ===== 4. 优势 vs 风险 ===== */}
+      {/* ===== 5. 优势 vs 风险 ===== */}
       {((extra.pros && extra.pros.length > 0) || (extra.risks && extra.risks.length > 0)) && (
         <div className="grid md:grid-cols-2 gap-3">
           {extra.pros && extra.pros.length > 0 && (
@@ -178,19 +197,19 @@ export default function AnalysisCard({ advice, holding }: Props) {
         </div>
       )}
 
-      {/* ===== 5. 操作建议（Markdown 渲染）===== */}
+      {/* ===== 6. 操作清单（advice，短可执行）===== */}
       {extra.advice && (
-        <div className="rounded-xl border border-accent/30 bg-gradient-to-br from-accent/10 to-emerald2/5 p-4">
+        <div className="rounded-xl border border-emerald2/30 bg-gradient-to-br from-emerald2/10 to-accent/5 p-4">
           <div className="flex items-center gap-2 mb-2">
-            <Target className="w-4 h-4 text-accent" />
-            <span className="text-sm font-medium">具体操作建议</span>
-            <span className="text-[10px] text-muted ml-1">AI 主观建议，仅供参考</span>
+            <Target className="w-4 h-4 text-emerald2" />
+            <span className="text-sm font-medium">操作清单</span>
+            <span className="text-[10px] text-muted ml-1">仓位 / 节奏 / 触发 / 止盈止损</span>
           </div>
           <MarkdownView content={extra.advice} />
         </div>
       )}
 
-      {/* ===== 6. 兜底：解析失败时的原始分析文本 ===== */}
+      {/* ===== 7. 兜底：解析失败时的原始分析文本 ===== */}
       {!hasStructured(extra) && advice.detail && (
         <details className="card p-3">
           <summary className="text-xs text-muted cursor-pointer hover:text-white">查看原始分析文本</summary>
@@ -209,7 +228,7 @@ export function hasStructured(extra: Advice["extra"]): boolean {
   if (!extra) return false;
   return !!(extra.fundamentals || extra.macro || extra.micro ||
     (extra.risks && extra.risks.length) || (extra.pros && extra.pros.length) ||
-    extra.advice);
+    extra.advice || extra.commentary);
 }
 
 function horizonLabel(h: string): string {

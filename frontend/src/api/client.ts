@@ -132,6 +132,8 @@ export interface AdviceExtra {
   risks?: string[];
   pros?: string[];
   advice?: string;
+  /** AI 深度点评：自由发挥的 Markdown 长文，是分析报告的主观核心。 */
+  commentary?: string;
   time_horizon?: "short" | "mid" | "long" | string;
   target_price?: number | null;
   stop_loss?: number | null;

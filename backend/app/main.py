@@ -89,7 +89,21 @@ app.include_router(chat_api.router)
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "app": settings.app_name}
+    # 运行时探针：用来快速判断当前 uvicorn 进程里加载的是不是最新代码。
+    # 如果 prompt_has_commentary 为 False，但磁盘上代码已经是新版，说明进程没有 reload。
+    try:
+        from .agent.hermes import SYSTEM_PROMPT as _SP
+        prompt_has_commentary = "commentary" in _SP
+        prompt_len = len(_SP)
+    except Exception:
+        prompt_has_commentary = False
+        prompt_len = 0
+    return {
+        "status": "ok",
+        "app": settings.app_name,
+        "prompt_has_commentary": prompt_has_commentary,
+        "prompt_len": prompt_len,
+    }
 
 
 # 静态托管前端构建产物（生产模式）
