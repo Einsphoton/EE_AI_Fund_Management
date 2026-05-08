@@ -549,35 +549,46 @@ def run_agent(
     api_key = (ai_config or {}).get("api_key") or ""
     model = (ai_config or {}).get("model") or "deepseek-chat"
     temperature = float((ai_config or {}).get("temperature", 0.4))
-    # 可配置超时，默认 180s——本地 Ollama 吐丰富 JSON 可能需要较长时间
+
+    # ==== 思考 / Reasoning 控制（兼容 2026 主流模型协议）====
+    # thinking_mode: "auto" | "on" | "off"
+    #   - auto: 不传任何思考参数（默认行为，最不易踩坑）
+    #   - on:   显式强制开启（DeepSeek V4 / Qwen3.5 / GLM-5 等 hybrid 模型生效）
+    #   - off:  显式强制关闭（hybrid 模型转为快速对话模式）
+    thinking_mode = str((ai_config or {}).get("thinking_mode") or "auto").lower()
+    if thinking_mode not in ("auto", "on", "off"):
+        thinking_mode = "auto"
+    try:
+        thinking_budget = int((ai_config or {}).get("thinking_budget") or 0)
+    except (TypeError, ValueError):
+        thinking_budget = 0
+    reasoning_effort = str((ai_config or {}).get("reasoning_effort") or "").lower()
+    if reasoning_effort not in ("", "minimal", "low", "medium", "high"):
+        reasoning_effort = "medium"
+
+    # 可配置超时
     try:
         timeout_sec = int((ai_config or {}).get("timeout") or 180)
     except (TypeError, ValueError):
         timeout_sec = 180
-    # max_tokens：此值同时控制"生成总时长"和"JSON 完整度"，是兼容 Cloudflare 120s
-    # 超时 + reasoning 模型的平衡点。
-    #   - 普通对话模型：1500-2500 token 就够写完整 JSON
-    #   - reasoning 模型（R1/Qwen3-thinking/o1）：reasoning 吃掉 2000-3000，
-    #     加 content 500-1000，总计 3000-4000 是甜点区。
-    #   - 不要随意调到 8000+：Ollama 生成 8000 token 要 150+ 秒，会被 CF 124 超时掐断。
-    # 显式 <=0 视为"完全不传"（让模型/服务端自由发挥，但不推荐经 CF 场景）。
-    #
-    # ⚠ 防呆：用户在 Settings 里如果设了 800/1000 这种很小的值，对 reasoning 模型来说
-    # 等于"思考还没开始就被掐断"，必然失败。这里强制 floor 到 4096，并打日志提示。
-    REASONING_SAFE_FLOOR = 4096
+    # 思考强制开 + 用户没显式调大超时 → 自动抬到 240s（思考会多花时间）
+    if thinking_mode == "on" and timeout_sec < 240:
+        print(f"[hermes] thinking_mode=on, 把 timeout 从 {timeout_sec} 抬到 240s")
+        timeout_sec = 240
+
+    # max_tokens 下限：思考开 → 8192；思考关/auto → 4096
+    REASONING_FLOOR = 8192 if thinking_mode == "on" else 4096
     try:
         raw_mt = (ai_config or {}).get("max_tokens")
         if raw_mt is None or raw_mt == "":
-            max_tokens = REASONING_SAFE_FLOOR
+            max_tokens = REASONING_FLOOR
         else:
             max_tokens = int(raw_mt)
     except (TypeError, ValueError):
-        max_tokens = REASONING_SAFE_FLOOR
-
-    # 防呆：>0 但太小，强制抬到安全下限
-    if 0 < max_tokens < REASONING_SAFE_FLOOR:
-        print(f"[hermes] max_tokens={max_tokens} 偏小，已自动调整为 {REASONING_SAFE_FLOOR}（兼容 reasoning 模型）")
-        max_tokens = REASONING_SAFE_FLOOR
+        max_tokens = REASONING_FLOOR
+    if 0 < max_tokens < REASONING_FLOOR:
+        print(f"[hermes] max_tokens={max_tokens} 偏小 (thinking={thinking_mode} 下限 {REASONING_FLOOR})，已自动抬高")
+        max_tokens = REASONING_FLOOR
 
     if not base_url or not api_key:
         result = _heuristic(points, holding)
@@ -616,6 +627,30 @@ def run_agent(
             }
             if max_tokens > 0:
                 kwargs["max_tokens"] = max_tokens
+
+            # ==== 思考参数透传（同时发多套，兼容不同厂家）====
+            # 思路：服务端不认识的字段 OpenAI SDK 会放进请求体，多数兼容服务直接忽略。
+            # 但有些严格服务（如 Together AI）会拒绝未知字段——这种情况下用户应设 thinking_mode=auto。
+            extra_body: dict[str, Any] = {}
+            if thinking_mode == "on":
+                # 主流国产（DeepSeek V4 / Qwen3.5 / GLM 系 / 豆包 / MiniMax）
+                extra_body["enable_thinking"] = True
+                if thinking_budget > 0:
+                    extra_body["thinking_budget"] = thinking_budget
+                # Anthropic Claude / 智谱 GLM-5 部分版本
+                extra_body["thinking"] = {
+                    "type": "enabled",
+                    **({"budget_tokens": thinking_budget} if thinking_budget > 0 else {}),
+                }
+                # OpenAI o-series / GPT-5 / Kimi K2 / Grok 4
+                if reasoning_effort:
+                    kwargs["reasoning_effort"] = reasoning_effort
+            elif thinking_mode == "off":
+                extra_body["enable_thinking"] = False
+                extra_body["thinking"] = {"type": "disabled"}
+            # auto 模式：什么思考相关参数都不传
+            if extra_body:
+                kwargs["extra_body"] = extra_body
             resp = client.chat.completions.create(**kwargs)
             choice = resp.choices[0] if resp.choices else None
             msg = choice.message if choice else None

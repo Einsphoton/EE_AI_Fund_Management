@@ -27,6 +27,21 @@ DEFAULTS: dict[str, Any] = {
         "max_tokens": 4096,
         # HTTP 超时（秒）。本地 Ollama 吐丰富 JSON 可能较慢
         "timeout": 180,
+        # ==== 思考 / Reasoning 控制（统一抽象，兼容 2026 年主流大模型）====
+        # thinking_mode:
+        #   "auto"  - 不显式传任何思考参数，让模型按默认行为运行（推荐）
+        #   "on"    - 强制开启思考（透传 enable_thinking=true / thinking.type="enabled"）
+        #   "off"   - 强制关闭思考（适用于"hybrid"模型如 DeepSeek V4 / Qwen3.5 / GLM-5）
+        # 三套参数会同时透传，不认识的字段会被 SDK 放进 extra_body 或被服务端忽略：
+        #   - enable_thinking + thinking_budget (DeepSeek V4 / Qwen3.5 / GLM 系 / 豆包 / MiniMax)
+        #   - thinking: {type, budget_tokens}  (Anthropic Claude / 部分 GLM)
+        #   - reasoning_effort                  (OpenAI o-series / GPT-5 / Kimi K2 / Grok 4)
+        "thinking_mode": "auto",
+        # 思考 token 预算（0 = 不限制）。仅 thinking_mode=on 时生效。
+        # 推荐值：浅思考 1024 / 标准 4096 / 深度推理 16384
+        "thinking_budget": 0,
+        # OpenAI o-series / GPT-5 / Kimi 风格的思考强度
+        "reasoning_effort": "medium",
         # 投资者性格：见 agent/profiles.py INVESTOR_PROFILES
         # balanced / conservative / aggressive / income / growth / value / trader
         "investor_profile": "balanced",

@@ -43,6 +43,7 @@ export default function SettingsPage() {
     temperature: 0.4, batch_concurrency: 1, max_tokens: 4096, timeout: 180,
     investor_profile: "balanced", report_style: "pro",
     cf_access_client_id: "", cf_access_client_secret: "", cf_access_hosts: "",
+    thinking_mode: "auto", thinking_budget: 0, reasoning_effort: "medium",
   });
   const [vision, setVision] = useState<NonNullable<AppSettings["vision"]>>({
     use_ai: true,  // 默认复用 AI 大模型，体验最简
@@ -66,6 +67,9 @@ export default function SettingsPage() {
       cf_access_client_id: data.ai.cf_access_client_id ?? "",
       cf_access_client_secret: data.ai.cf_access_client_secret ?? "",
       cf_access_hosts: data.ai.cf_access_hosts ?? "",
+      thinking_mode: (data.ai.thinking_mode as any) ?? "auto",
+      thinking_budget: data.ai.thinking_budget ?? 0,
+      reasoning_effort: (data.ai.reasoning_effort as any) ?? "medium",
     });
     if (data.vision) {
       setVision({
@@ -104,6 +108,9 @@ export default function SettingsPage() {
     cf_access_client_id: ai.cf_access_client_id,
     cf_access_client_secret: ai.cf_access_client_secret,
     cf_access_hosts: ai.cf_access_hosts,
+    thinking_mode: ai.thinking_mode as any,
+    thinking_budget: ai.thinking_budget,
+    reasoning_effort: ai.reasoning_effort as any,
   }), [ai]);
 
   const onAiChange = (v: LLMConfigState) => {

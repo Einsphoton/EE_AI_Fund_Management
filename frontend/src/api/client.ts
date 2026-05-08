@@ -200,6 +200,12 @@ export interface AppSettings {
     cf_access_client_id?: string;
     cf_access_client_secret?: string;
     cf_access_hosts?: string;
+    /** 思考模式：auto / on / off （兼容 DeepSeek V4 / Qwen3.5 / GLM-5 / Claude / GPT-5 等） */
+    thinking_mode?: "auto" | "on" | "off";
+    /** 思考 token 预算（0=不限制） */
+    thinking_budget?: number;
+    /** OpenAI o-series / GPT-5 / Kimi 等的强度参数：minimal / low / medium / high */
+    reasoning_effort?: "minimal" | "low" | "medium" | "high" | string;
   };
   /** 多模态视觉模型（用于 OCR 截图导入） */
   vision?: {

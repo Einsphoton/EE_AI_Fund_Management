@@ -38,6 +38,10 @@ export interface LLMConfigState {
   cf_access_client_id?: string;    // 仅 AI 卡片维护，Vision 卡片复用 AI 的
   cf_access_client_secret?: string;
   cf_access_hosts?: string;
+  // 思考 / Reasoning 控制（AI 专有，Vision 不需要）
+  thinking_mode?: "auto" | "on" | "off";
+  thinking_budget?: number;
+  reasoning_effort?: "minimal" | "low" | "medium" | "high" | string;
 }
 
 export interface LLMConfigCardProps {
@@ -224,6 +228,86 @@ export default function LLMConfigCard({
           </div>
         </div>
       </div>
+
+      {/* ============ 思考 / Reasoning（仅 ai 模式） ============ */}
+      {mode === "ai" && (
+        <div className="mt-4 rounded-lg border border-line/60 bg-bg-soft/40 p-3">
+          <div className="text-xs font-medium text-white/90 mb-2 flex items-center gap-2">
+            <Zap className="w-3.5 h-3.5 text-accent" />
+            思考 / Reasoning
+            <span className="text-[10px] text-muted font-normal ml-auto">
+              兼容 DeepSeek V4 / Qwen3.5 / GLM-5 / GPT-5 / Claude / Kimi 等
+            </span>
+          </div>
+
+          <label className="label">思考模式</label>
+          <div className="grid grid-cols-3 gap-2 mb-2">
+            {([
+              { v: "auto", label: "自动", desc: "不传任何思考参数（推荐）" },
+              { v: "on",   label: "强制开",  desc: "hybrid 模型开启深度思考" },
+              { v: "off",  label: "强制关",  desc: "hybrid 模型转为快速对话" },
+            ] as const).map((opt) => {
+              const active = (value.thinking_mode || "auto") === opt.v;
+              return (
+                <button
+                  key={opt.v}
+                  type="button"
+                  className={`btn flex-col items-start text-left h-auto py-2 ${
+                    active ? "border-accent/60 bg-accent/15 text-white" : ""
+                  }`}
+                  onClick={() => set({ thinking_mode: opt.v })}
+                  title={opt.desc}
+                >
+                  <div className="text-sm font-medium">{opt.label}</div>
+                  <div className="text-[10px] text-muted leading-tight">{opt.desc}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          {(value.thinking_mode || "auto") === "on" && (
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <div>
+                <label className="label">思考预算（tokens）</label>
+                <input
+                  className="input"
+                  type="number" min={0} max={32000} step={512}
+                  value={value.thinking_budget ?? 0}
+                  onChange={(e) => set({ thinking_budget: Math.max(0, e.target.valueAsNumber || 0) })}
+                />
+                <p className="text-[10px] text-muted mt-1 leading-relaxed">
+                  0 = 不限。1024 浅思考 / 4096 标准 / 16384 深度。<br />
+                  对应：DeepSeek V4 / Qwen3.5 的 <code>thinking_budget</code>、Claude 的 <code>budget_tokens</code>。
+                </p>
+              </div>
+              <div>
+                <label className="label">推理强度</label>
+                <select
+                  className="input"
+                  value={value.reasoning_effort || "medium"}
+                  onChange={(e) => set({ reasoning_effort: e.target.value })}
+                >
+                  <option value="minimal">minimal（最快，GPT-5 专属）</option>
+                  <option value="low">low（轻度推理）</option>
+                  <option value="medium">medium（标准）</option>
+                  <option value="high">high（深度推理）</option>
+                </select>
+                <p className="text-[10px] text-muted mt-1 leading-relaxed">
+                  对应：OpenAI o1/o3/GPT-5 / Kimi K2 / Grok 4 的 <code>reasoning_effort</code>。<br />
+                  不支持的模型会被服务端忽略。
+                </p>
+              </div>
+            </div>
+          )}
+
+          {(value.thinking_mode || "auto") === "off" && (
+            <p className="text-[11px] text-amber2/90 mt-1 leading-relaxed">
+              ⚠️ 强制关闭思考。适合 hybrid 模型（DeepSeek V4 / Qwen3.5 / GLM-5）想用快速对话模式时。
+              对纯推理模型（DeepSeek-R2 / o1）无效。
+            </p>
+          )}
+        </div>
+      )}
 
       {/* ============ Cloudflare Access ============ */}
       {showCfAccess && (
