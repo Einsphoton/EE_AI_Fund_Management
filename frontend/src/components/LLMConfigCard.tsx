@@ -21,7 +21,8 @@ import { Settings as SettingsApi } from "../api/client";
 export interface LLMPreset {
   name: string;
   base_url: string;
-  model: string;
+  /** 仅作占位提示用（如 "qwen-..."），不会自动填到 model 输入框，避免预设带过期模型名 */
+  model_hint?: string;
 }
 
 /** 通用 LLM 配置数据结构（AI / Vision 共用）。 */
@@ -110,19 +111,24 @@ export default function LLMConfigCard({
 
       {/* ============ 预设 ============ */}
       {presets.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-3">
-          {presets.map((p) => (
-            <button
-              key={p.name}
-              type="button"
-              className="btn !px-3 !py-1.5 text-xs"
-              onClick={() => set({ base_url: p.base_url, model: p.model })}
-              title={`${p.base_url}\n${p.model}`}
-            >
-              {p.name}
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="flex flex-wrap gap-2 mb-1">
+            {presets.map((p) => (
+              <button
+                key={p.name}
+                type="button"
+                className="btn !px-3 !py-1.5 text-xs"
+                onClick={() => set({ base_url: p.base_url })}
+                title={`填入 Base URL：${p.base_url}\n（模型名请连接后从下方列表里选）`}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-muted mb-3">
+            点击预设只填 Base URL；模型名请填好 API Key 后点「测试连接」，从返回的列表里选。
+          </p>
+        </>
       )}
 
       <label className="label">Base URL</label>
@@ -147,7 +153,7 @@ export default function LLMConfigCard({
           <label className="label">Model</label>
           <input
             className="input"
-            placeholder={presets[0]?.model || ""}
+            placeholder="点测试连接后从列表选"
             value={value.model || ""}
             onChange={(e) => set({ model: e.target.value })}
           />

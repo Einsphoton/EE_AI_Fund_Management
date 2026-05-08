@@ -16,21 +16,21 @@ const PRESETS: Record<string, string> = {
 };
 
 const AI_PRESETS: LLMPreset[] = [
-  { name: "DeepSeek", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-  { name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  { name: "Ollama (本地)", base_url: "http://192.168.1.100:11434/v1", model: "qwen3:14b" },
-  { name: "LM Studio (本地)", base_url: "http://192.168.1.100:1234/v1", model: "local-model" },
-  { name: "oMLX (Apple Silicon)", base_url: "http://127.0.0.1:8080/v1", model: "mlx-community/Qwen3-14B-Instruct-4bit" },
+  { name: "DeepSeek", base_url: "https://api.deepseek.com/v1" },
+  { name: "OpenAI", base_url: "https://api.openai.com/v1" },
+  { name: "智谱 BigModel", base_url: "https://open.bigmodel.cn/api/paas/v4" },
+  { name: "通义千问", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { name: "月之暗面 Kimi", base_url: "https://api.moonshot.cn/v1" },
+  { name: "Ollama (本地)", base_url: "http://192.168.1.100:11434/v1" },
+  { name: "LM Studio (本地)", base_url: "http://192.168.1.100:1234/v1" },
+  { name: "oMLX (Apple Silicon)", base_url: "http://127.0.0.1:8080/v1" },
 ];
 
 const VISION_PRESETS: LLMPreset[] = [
-  { name: "通义千问 VL Max", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-vl-max" },
-  { name: "通义 VL Plus（便宜）", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-vl-plus" },
-  { name: "智谱 GLM-4V", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4v" },
-  { name: "智谱 GLM-4V Plus", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4v-plus" },
-  { name: "OpenAI GPT-4o", base_url: "https://api.openai.com/v1", model: "gpt-4o" },
-  { name: "OpenAI GPT-4o mini", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  { name: "Ollama qwen2.5-vl (本地)", base_url: "http://192.168.1.100:11434/v1", model: "qwen2.5-vl:7b" },
+  { name: "通义千问 (视觉)", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { name: "智谱 BigModel", base_url: "https://open.bigmodel.cn/api/paas/v4" },
+  { name: "OpenAI", base_url: "https://api.openai.com/v1" },
+  { name: "Ollama (本地)", base_url: "http://192.168.1.100:11434/v1" },
 ];
 
 export default function SettingsPage() {
@@ -45,6 +45,7 @@ export default function SettingsPage() {
     cf_access_client_id: "", cf_access_client_secret: "", cf_access_hosts: "",
   });
   const [vision, setVision] = useState<NonNullable<AppSettings["vision"]>>({
+    use_ai: true,  // 默认复用 AI 大模型，体验最简
     base_url: "", api_key: "", model: "",
     temperature: 0.1, max_tokens: 4096, timeout: 180, concurrency: 2,
   });
@@ -68,6 +69,7 @@ export default function SettingsPage() {
     });
     if (data.vision) {
       setVision({
+        use_ai: data.vision.use_ai ?? true,
         base_url: data.vision.base_url ?? "",
         api_key: data.vision.api_key ?? "",
         model: data.vision.model ?? "",
@@ -158,21 +160,71 @@ export default function SettingsPage() {
         />
 
         {/* ============ 视觉模型 ============ */}
-        <LLMConfigCard
-          title="视觉模型（OCR 截图导入）"
-          subtitle="用于「OCR 导入」识别持仓截图。需选支持 image_url 的多模态模型。"
-          icon={<Camera className="w-4 h-4 text-accent" />}
-          presets={VISION_PRESETS}
-          value={visionAsLLM}
-          onChange={onVisionChange}
-          mode="vision"
-          showCfAccess={false}
-          testHint={
-            ai.cf_access_client_id
-              ? "已检测到 AI 配置里的 Cloudflare Access Token，视觉模型会自动复用（如果命中 hosts 列表）。"
-              : "若视觉模型也走 Cloudflare Tunnel，请先在 AI 大模型卡片填好 CF Access。"
-          }
-        />
+        {vision.use_ai ? (
+          <div className="card p-5 flex flex-col">
+            <h3 className="font-semibold mb-1 flex items-center gap-2">
+              <Camera className="w-4 h-4 text-accent" />
+              视觉模型（OCR 截图导入）
+            </h3>
+            <p className="text-xs text-muted mb-4">
+              用于「OCR 导入」识别持仓截图。
+            </p>
+
+            <label className="flex items-center gap-2 cursor-pointer mb-3 select-none">
+              <input
+                type="checkbox" className="accent-accent w-4 h-4"
+                checked={vision.use_ai ?? true}
+                onChange={(e) => setVision({ ...vision, use_ai: e.target.checked })}
+              />
+              <span className="text-sm">复用 AI 大模型配置</span>
+            </label>
+
+            <div className="rounded-lg border border-emerald2/30 bg-emerald2/5 p-4 text-xs leading-relaxed flex-1">
+              <div className="flex items-center gap-2 text-emerald2 font-medium mb-2">
+                <Check className="w-4 h-4" />
+                已启用：直接使用上方 AI 大模型的 base_url / api_key / model
+              </div>
+              <p className="text-muted">
+                如果你左侧填的 AI 大模型本身就支持视觉输入（多模态），开这个开关最省事。
+              </p>
+              <p className="text-muted mt-2">
+                <strong className="text-white/90">⚠️ 但请注意：</strong>
+                必须确保 AI 大模型卡片里填的是 <strong className="text-white/90">多模态模型</strong>
+                （如 qwen-vl、glm-4v、gpt-4o 系列），普通文本模型（deepseek-chat、qwen3）不支持图片输入。
+              </p>
+              <p className="text-muted mt-2">
+                如果想让 OCR 走单独的多模态模型（不影响 AI 分析用的文本模型），关闭此开关后单独配置。
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer mb-3 select-none px-1">
+              <input
+                type="checkbox" className="accent-accent w-4 h-4"
+                checked={vision.use_ai ?? false}
+                onChange={(e) => setVision({ ...vision, use_ai: e.target.checked })}
+              />
+              <span className="text-sm">复用 AI 大模型配置</span>
+              <span className="text-[11px] text-muted">（关闭时单独配置下方模型）</span>
+            </label>
+            <LLMConfigCard
+              title="视觉模型（OCR 截图导入）"
+              subtitle="用于「OCR 导入」识别持仓截图。需选支持图片输入的多模态模型。"
+              icon={<Camera className="w-4 h-4 text-accent" />}
+              presets={VISION_PRESETS}
+              value={visionAsLLM}
+              onChange={onVisionChange}
+              mode="vision"
+              showCfAccess={false}
+              testHint={
+                ai.cf_access_client_id
+                  ? "已检测到 AI 配置里的 Cloudflare Access Token，视觉模型会自动复用（如果命中 hosts 列表）。"
+                  : "若视觉模型也走 Cloudflare Tunnel，请先在 AI 大模型卡片填好 CF Access。"
+              }
+            />
+          </div>
+        )}
 
         {/* ============ 定时分析 ============ */}
         <div className="card p-5">

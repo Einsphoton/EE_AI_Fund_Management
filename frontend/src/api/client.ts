@@ -203,6 +203,8 @@ export interface AppSettings {
   };
   /** 多模态视觉模型（用于 OCR 截图导入） */
   vision?: {
+    /** 复用 AI 大模型配置（开启后下面字段都忽略，直接走 ai 配置） */
+    use_ai?: boolean;
     base_url: string;
     api_key: string;
     model: string;
