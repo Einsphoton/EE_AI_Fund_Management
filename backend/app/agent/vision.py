@@ -102,14 +102,24 @@ def _get_vision_config(db) -> dict | None:
     return cfg
 
 
-def _build_client(cfg: dict) -> OpenAI:
-    headers = {}
-    # 复用 ai 配置的 CF Access header（用户可能把 vision 也放在受保护的内网域名）
+def _build_client(db, cfg: dict) -> OpenAI:
+    """构造 OpenAI 客户端，自动注入 ai 配置里的 Cloudflare Access header。
+
+    视觉模型走自建 Cloudflare Tunnel 时，需要把 CF-Access-Client-Id/Secret
+    带上才能通过 Zero Trust 拦截；这套 token 与 ai 配置共用。
+    """
+    from .hermes import _build_cf_headers  # 复用 hermes 的 CF header 构造逻辑
+    ai_cfg = settings_service.get(db, "ai") or {}
+    headers = _build_cf_headers(cfg["base_url"], ai_cfg)
+    default_headers = {"User-Agent": headers.get("User-Agent", "")}
+    if "CF-Access-Client-Id" in headers:
+        default_headers["CF-Access-Client-Id"] = headers["CF-Access-Client-Id"]
+        default_headers["CF-Access-Client-Secret"] = headers["CF-Access-Client-Secret"]
     return OpenAI(
         base_url=cfg["base_url"],
         api_key=cfg["api_key"] or "EMPTY",
         timeout=cfg.get("timeout", 180),
-        default_headers=headers,
+        default_headers=default_headers,
     )
 
 
@@ -158,7 +168,7 @@ async def parse_image(
     if not cfg:
         return {"platform": "未配置", "items": [], "error": "请先在『设置』里配置视觉模型"}
 
-    client = _build_client(cfg)
+    client = _build_client(db, cfg)
     data_url = _img_to_data_url(image_bytes, mime)
 
     user_text = "请识别这张截图里的所有持仓项，按 schema 输出 JSON。"
@@ -186,7 +196,48 @@ async def parse_image(
         )
         text = (resp.choices[0].message.content or "").strip()
     except Exception as e:
-        return {"platform": "错误", "items": [], "error": f"视觉模型调用失败：{type(e).__name__}: {str(e)[:200]}"}
+        # 详细错误信息：尽量从 OpenAI SDK 异常里挖出 status_code + body
+        err_type = type(e).__name__
+        err_msg = str(e)
+        # OpenAI SDK 的 APIStatusError 会把 server 返回的 JSON 放在 .body / .response
+        body = ""
+        try:
+            body_obj = getattr(e, "body", None)
+            if body_obj:
+                body = json.dumps(body_obj, ensure_ascii=False)[:600]
+        except Exception:
+            pass
+        if not body:
+            try:
+                resp_obj = getattr(e, "response", None)
+                if resp_obj is not None and hasattr(resp_obj, "text"):
+                    body = str(resp_obj.text)[:600]
+            except Exception:
+                pass
+        # 控制台打印完整错误，便于在后端日志里排查
+        print(f"[vision] FAIL model={cfg.get('model')} type={err_type} msg={err_msg[:300]}")
+        if body:
+            print(f"[vision] response_body={body}")
+
+        # 给前端一个可读的错误提示
+        hint = ""
+        low = err_msg.lower()
+        if "blocked" in low or "permissiondenied" in low.replace(" ", "") or "permission_denied" in low:
+            hint = "（多为内容安全/鉴权拒绝：截图含敏感字样、模型不支持图像、或 API Key 没开图像权限）"
+        elif "model not found" in low or "unknown model" in low:
+            hint = "（模型不存在，请检查 model 名是否填对，例如 qwen-vl-max / glm-4v）"
+        elif "401" in err_msg or "invalid api key" in low:
+            hint = "（API Key 无效）"
+        elif "429" in err_msg:
+            hint = "（被限流，请稍后重试或降低并发）"
+        elif "timeout" in low:
+            hint = "（请求超时，截图过大或网络慢）"
+
+        return {
+            "platform": "错误", "items": [],
+            "error": f"视觉模型调用失败：{err_type}: {err_msg[:300]}{hint}",
+            "raw_body": body,
+        }
 
     parsed = _safe_parse(text)
     if not parsed or not isinstance(parsed, dict):
