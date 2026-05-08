@@ -34,8 +34,8 @@ export default function SettingsPage() {
     api_key: "",
     model: "",
     temperature: 0.4,
-    batch_concurrency: 4,
-    max_tokens: 800,
+    batch_concurrency: 1,
+    max_tokens: 4096,
     timeout: 180,
     investor_profile: "balanced",
     report_style: "pro",
@@ -63,8 +63,8 @@ export default function SettingsPage() {
       api_key: data.ai.api_key ?? "",
       model: data.ai.model ?? "",
       temperature: data.ai.temperature ?? 0.4,
-      batch_concurrency: data.ai.batch_concurrency ?? 4,
-      max_tokens: data.ai.max_tokens ?? 800,
+      batch_concurrency: data.ai.batch_concurrency ?? 1,
+      max_tokens: data.ai.max_tokens ?? 4096,
       timeout: data.ai.timeout ?? 180,
       investor_profile: data.ai.investor_profile ?? "balanced",
       report_style: data.ai.report_style ?? "pro",
@@ -200,31 +200,32 @@ export default function SettingsPage() {
                 <input
                   className="input"
                   type="number" step="1" min={1} max={16}
-                  value={ai.batch_concurrency ?? 4}
+                  value={ai.batch_concurrency ?? 1}
                   onChange={(e) =>
                     setAi({ ...ai, batch_concurrency: Math.max(1, Math.min(16, e.target.valueAsNumber || 1)) })
                   }
                 />
                 <p className="text-[10px] text-muted mt-1 leading-relaxed">
                   同时分析的标的数。<br />
-                  云端 (DeepSeek/OpenAI) 建议 3-6；<br />
-                  自建 Ollama 建议 1-2。
+                  reasoning 模型 + Cloudflare 建议 1（串行）；<br />
+                  普通模型 + 内网直连可调 3-6。
                 </p>
               </div>
               <div>
                 <label className="label">Max Tokens</label>
                 <input
                   className="input"
-                  type="number" step="50" min={0} max={8192}
-                  value={ai.max_tokens ?? 800}
+                  type="number" step="256" min={0} max={16384}
+                  value={ai.max_tokens ?? 4096}
                   onChange={(e) =>
                     setAi({ ...ai, max_tokens: Math.max(0, e.target.valueAsNumber || 0) })
                   }
                 />
                 <p className="text-[10px] text-muted mt-1 leading-relaxed">
-                  单次输出 token 上限。<br />
-                  结构化 JSON 推荐 600-1000；<br />
-                  0 表示不限制。
+                  单次输出 token 上限。推荐 4096：<br />
+                  普通对话模型只用 1500-2500，reasoning 模型（R1/Qwen3-thinking/o1）<br />
+                  会用 3000+ 写思考过程，设得太低（如 800）会被截断写不出最终答案。<br />
+                  0 表示不限制（不推荐经过 Cloudflare 时使用，可能 524 超时）。
                 </p>
               </div>
               <div>

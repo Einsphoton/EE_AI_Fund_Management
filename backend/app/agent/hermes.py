@@ -545,14 +545,23 @@ def run_agent(
     #     加 content 500-1000，总计 3000-4000 是甜点区。
     #   - 不要随意调到 8000+：Ollama 生成 8000 token 要 150+ 秒，会被 CF 124 超时掐断。
     # 显式 <=0 视为"完全不传"（让模型/服务端自由发挥，但不推荐经 CF 场景）。
+    #
+    # ⚠ 防呆：用户在 Settings 里如果设了 800/1000 这种很小的值，对 reasoning 模型来说
+    # 等于"思考还没开始就被掐断"，必然失败。这里强制 floor 到 4096，并打日志提示。
+    REASONING_SAFE_FLOOR = 4096
     try:
         raw_mt = (ai_config or {}).get("max_tokens")
         if raw_mt is None or raw_mt == "":
-            max_tokens = 4096
+            max_tokens = REASONING_SAFE_FLOOR
         else:
             max_tokens = int(raw_mt)
     except (TypeError, ValueError):
-        max_tokens = 4096
+        max_tokens = REASONING_SAFE_FLOOR
+
+    # 防呆：>0 但太小，强制抬到安全下限
+    if 0 < max_tokens < REASONING_SAFE_FLOOR:
+        print(f"[hermes] max_tokens={max_tokens} 偏小，已自动调整为 {REASONING_SAFE_FLOOR}（兼容 reasoning 模型）")
+        max_tokens = REASONING_SAFE_FLOOR
 
     if not base_url or not api_key:
         result = _heuristic(points, holding)

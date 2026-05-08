@@ -13,10 +13,18 @@ DEFAULTS: dict[str, Any] = {
         "api_key": "",
         "model": "deepseek-chat",
         "temperature": 0.4,
-        # 批量分析的最大并发度（1=串行，云端模型建议 3-6，自建 Ollama 建议 1-2）
-        "batch_concurrency": 4,
-        # 单次 LLM 响应的最大 token 数（0 = 不限制）。结构化 JSON 输出用 800 已足够
-        "max_tokens": 800,
+        # 批量分析的最大并发度（1=串行）。
+        # 默认 1：reasoning 模型（R1/Qwen3-thinking）单次请求耗时 60-90s，
+        # 经 Cloudflare 时有 120s 硬超时，并发越高越容易踩 524。
+        # 普通对话模型 + 内网直连可以手动调到 3-6。
+        "batch_concurrency": 1,
+        # 单次 LLM 响应的最大 token 数（0 = 不限制）。
+        # 默认 4096：
+        # - 普通对话模型只用其中 1500-2500 写完整 JSON（够用）
+        # - reasoning 模型 reasoning 段会吃 2000-3000，再加 content 1000，4096 是平衡点
+        # 设得太低（如 800）reasoning 模型会被截断，永远写不出 content；设得太高
+        # （如 8192+）经 CF 时会因生成耗时过长触发 524 超时。
+        "max_tokens": 4096,
         # HTTP 超时（秒）。本地 Ollama 吐丰富 JSON 可能较慢
         "timeout": 180,
         # 投资者性格：见 agent/profiles.py INVESTOR_PROFILES
