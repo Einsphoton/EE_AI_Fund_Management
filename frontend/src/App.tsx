@@ -11,7 +11,9 @@ import Advice from "./pages/Advice";
 import AIChat from "./pages/AIChat";
 import ImportOcr from "./pages/ImportOcr";
 import { AnalysisTaskProvider } from "./lib/analysisTask";
+import { OcrTaskProvider } from "./lib/ocrTask";
 import AnalysisTaskIndicator from "./components/AnalysisTaskIndicator";
+import OcrTaskIndicator from "./components/OcrTaskIndicator";
 
 const NAV = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard, end: true },
@@ -28,6 +30,7 @@ export default function App() {
   void loc;
   return (
     <AnalysisTaskProvider>
+      <OcrTaskProvider>
       <div className="min-h-screen flex bg-bg bg-grid-fade">
         <aside className="w-60 shrink-0 border-r border-line/60 bg-bg/60 backdrop-blur-md hidden md:flex flex-col">
           <div className="px-5 py-6 flex items-center gap-3">
@@ -79,7 +82,10 @@ export default function App() {
 
         {/* 全局分析任务悬浮指示器：任何页面进行中都可见 */}
         <AnalysisTaskIndicator />
+        {/* OCR 任务悬浮指示器：识别中/完成待确认时全局可见 */}
+        <OcrTaskIndicator />
       </div>
+      </OcrTaskProvider>
     </AnalysisTaskProvider>
   );
 }

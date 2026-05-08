@@ -495,8 +495,56 @@ export const ImportApi = {
     });
     return r.data;
   },
+  /** 异步任务版：立即返回 job_id，后台跑视觉模型 */
+  start: async (files: File[], platformHint = ""): Promise<{ job_id: string; snapshot: OcrJobSnapshot }> => {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    if (platformHint) fd.append("platform_hint", platformHint);
+    const r = await api.post("/import/ocr/start", fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 60_000,
+    });
+    return r.data;
+  },
+  getJob: async (jobId: string): Promise<{
+    snapshot: OcrJobSnapshot;
+    events: (OcrJobEvent & { ts: number })[];
+    result: { results: OcrParseResult[]; total: number } | null;
+  }> => {
+    const r = await api.get(`/import/ocr/jobs/${jobId}`, { timeout: 30_000 });
+    return r.data;
+  },
+  listJobs: async (limit = 10): Promise<{ items: OcrJobSnapshot[] }> => {
+    const r = await api.get(`/import/ocr/jobs`, { params: { limit }, timeout: 10_000 });
+    return r.data;
+  },
   commit: async (items: OcrCommitItem[]): Promise<{ created: number; appended: number; skipped: number; errors: string[] }> => {
     const r = await api.post("/import/ocr/commit", { items }, { timeout: 60_000 });
     return r.data;
   },
 };
+
+// ---- OCR 异步任务事件 ----
+
+export interface OcrJobSnapshot {
+  job_id: string;
+  status: "pending" | "parsing" | "done" | "error";
+  total: number;
+  finished: number;
+  platform_hint: string;
+  file_names: string[];
+  error: string | null;
+  created_at: number;
+  finished_at: number | null;
+  has_result: boolean;
+}
+
+export type OcrJobEvent =
+  | { type: "start"; total: number; platform_hint: string; files: string[] }
+  | { type: "thought"; text: string; file?: string }
+  | { type: "image_start"; index: number; total: number; file: string }
+  | { type: "image_done"; index: number; file: string; platform: string; items_count: number; matched_count: number; elapsed: number }
+  | { type: "image_error"; index: number; file: string; error: string; elapsed?: number }
+  | { type: "progress"; finished: number; total: number }
+  | { type: "done"; total_items: number; files: number; errors: number }
+  | { type: "fatal"; error: string };

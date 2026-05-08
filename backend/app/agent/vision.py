@@ -182,8 +182,23 @@ async def parse_image(
     *,
     mime: str = "image/jpeg",
     platform_hint: str = "",
+    on_log=None,
 ) -> dict[str, Any]:
-    """解析单张截图。返回标准化字典；失败时 items=[]。"""
+    """解析单张截图。返回标准化字典；失败时 items=[]。
+
+    Parameters
+    ----------
+    on_log : Optional[Callable[[str], Awaitable[None]]]
+        异步日志回调；用于 OCR 任务把"思考过程"实时推给前端。
+        关键节点：发送请求 / 收到响应 / JSON 解析成功 / 字段规范化。
+    """
+    async def _log(msg: str):
+        if on_log:
+            try:
+                await on_log(msg)
+            except Exception:
+                pass
+
     cfg = _get_vision_config(db)
     if not cfg:
         # 给出针对性提示
@@ -192,6 +207,7 @@ async def parse_image(
             msg = "已开启『复用 AI 大模型』，但 AI 大模型未配置 base_url / model。请到『设置 → AI 大模型』填好。"
         else:
             msg = "请先在『设置 → 视觉模型』填入 base_url / api_key / model；或勾选『复用 AI 大模型』。"
+        await _log("视觉模型未配置，跳过本张")
         return {"platform": "未配置", "items": [], "error": msg}
 
     client = _build_client(db, cfg)
@@ -212,6 +228,12 @@ async def parse_image(
         },
     ]
 
+    await _log(
+        f"已构造 prompt（图片转 base64 共 {len(data_url)//1024} KB）→ 调用 "
+        f"{cfg['model']}（temperature={cfg.get('temperature', 0.1)}, "
+        f"max_tokens={cfg.get('max_tokens', 4096)}）"
+    )
+
     try:
         resp = await asyncio.to_thread(
             client.chat.completions.create,
@@ -221,6 +243,15 @@ async def parse_image(
             max_tokens=cfg.get("max_tokens", 4096),
         )
         text = (resp.choices[0].message.content or "").strip()
+        usage = getattr(resp, "usage", None)
+        if usage:
+            await _log(
+                f"模型响应到达，输入 {getattr(usage, 'prompt_tokens', '?')} / "
+                f"输出 {getattr(usage, 'completion_tokens', '?')} tokens，"
+                f"原始内容 {len(text)} 字符"
+            )
+        else:
+            await _log(f"模型响应到达，原始内容 {len(text)} 字符")
     except Exception as e:
         # 详细错误信息：尽量从 OpenAI SDK 异常里挖出 status_code + body
         err_type = type(e).__name__
@@ -244,6 +275,7 @@ async def parse_image(
         print(f"[vision] FAIL model={cfg.get('model')} type={err_type} msg={err_msg[:300]}")
         if body:
             print(f"[vision] response_body={body}")
+        await _log(f"视觉模型调用失败：{err_type}: {err_msg[:200]}")
 
         # 给前端一个可读的错误提示
         hint = ""
@@ -267,6 +299,7 @@ async def parse_image(
 
     parsed = _safe_parse(text)
     if not parsed or not isinstance(parsed, dict):
+        await _log("模型返回不是合法 JSON，已尝试剥离围栏后仍失败")
         return {
             "platform": "解析失败", "items": [],
             "error": "模型返回不是合法 JSON",
@@ -281,11 +314,18 @@ async def parse_image(
 
     # 类型规范化（兜底）
     valid_types = {t.value for t in models.AssetType}
+    fixed_types = 0
     for it in parsed["items"]:
         if not isinstance(it, dict):
             continue
         if it.get("asset_type") not in valid_types:
             it["asset_type"] = "fund"  # 兜底
+            fixed_types += 1
+    await _log(
+        f"JSON 解析成功，平台={parsed.get('platform')}，"
+        f"识别到 {len(parsed['items'])} 项"
+        + (f"（{fixed_types} 项类型已兜底为 fund）" if fixed_types else "")
+    )
     return parsed
 
 

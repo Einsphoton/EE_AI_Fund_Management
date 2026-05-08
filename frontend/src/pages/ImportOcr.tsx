@@ -2,21 +2,24 @@
  * OCR 批量导入页：
  *   1) 拖拽 / 选择多张持仓页截图
  *   2) 选择平台提示（可不选）
- *   3) 上传 → 后端走视觉模型解析 → 返回每项 OCR 结果 + 现有资产候选 + 建议动作
- *   4) 用户在表格里逐行编辑：动作（创建/追加/减仓/更新/跳过）、绑定资产、份额、价格…
- *   5) 一键提交 → 事务性入库
+ *   3) 上传 → 后台异步跑视觉模型，前端 SSE 实时滚动"AI 思考过程" + 进度条
+ *   4) 切走再回来不会丢任务（OcrTaskProvider 跨路由保活）
+ *   5) 解析完后表格里逐行编辑、确认入库
  */
-import { useMemo, useState } from "react";
-import { Upload, Image as ImageIcon, X, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Upload, Image as ImageIcon, X, CheckCircle2, AlertCircle, Loader2,
+  Brain, Eye, EyeOff, RotateCcw,
+} from "lucide-react";
 import toast from "react-hot-toast";
 
 import PageHeader from "../components/PageHeader";
 import {
-  ImportApi, OcrItem, OcrParseResult, OcrCommitItem,
-  AssetType, Market,
+  OcrItem, OcrCommitItem, AssetType, Market,
 } from "../api/client";
 import { ASSET_TYPE_META, metaOf } from "../lib/assetMeta";
 import { fmtMoney } from "../lib/format";
+import { useOcrTask, OcrThought } from "../lib/ocrTask";
 
 interface UploadFile {
   file: File;
@@ -28,9 +31,7 @@ interface RowState {
   fileIdx: number;
   itemIdx: number;
   origin: OcrItem;
-  // 用户编辑后的最终决策
   decision: OcrCommitItem;
-  // 用户当前选中的候选 asset_id（null 表示新建）
   bindAssetId: number | null;
 }
 
@@ -40,12 +41,57 @@ const PLATFORM_HINTS = [
 ];
 
 export default function ImportOcr() {
+  const ocr = useOcrTask();
+
+  // 上传文件本地态（这部分不需要跨路由保活；提交完会清空）
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [platformHint, setPlatformHint] = useState("");
-  const [parsing, setParsing] = useState(false);
-  const [committing, setCommitting] = useState(false);
-  const [parseResults, setParseResults] = useState<OcrParseResult[]>([]);
+
+  // 行编辑态：从 ocr.results 派生 → 用 useState 缓存以便用户编辑
   const [rows, setRows] = useState<RowState[]>([]);
+
+  // 当 ocr.results 更新时（解析完成 / 重新挂回任务）→ 重建行
+  useEffect(() => {
+    if (ocr.results.length === 0) {
+      setRows([]);
+      return;
+    }
+    const newRows: RowState[] = [];
+    ocr.results.forEach((res, fileIdx) => {
+      res.items.forEach((it, itemIdx) => {
+        const sug = it._suggestion;
+        const top = (it._candidates && it._candidates[0]) || null;
+        newRows.push({
+          fileIdx, itemIdx, origin: it,
+          bindAssetId: top?.asset_id ?? null,
+          decision: {
+            action: sug?.action || "create",
+            asset_id: top?.asset_id ?? null,
+            name: it.name || "",
+            code: it.code || "",
+            asset_type: it.asset_type,
+            market: defaultMarketFor(it.asset_type),
+            platform: res.platform || platformHint || "",
+            shares: it.shares ?? undefined,
+            delta_shares: sug?.delta_shares,
+            delta_amount: sug?.delta_amount,
+            avg_cost: it.avg_cost ?? undefined,
+            current_price: it.current_price ?? undefined,
+            market_value: it.market_value ?? undefined,
+            profit: it.profit ?? undefined,
+            profit_pct: it.profit_pct ?? undefined,
+            principal_amount: it.amount ?? it.market_value ?? undefined,
+            yield_7d: it.yield_7d ?? undefined,
+            expected_apr: it.expected_apr ?? undefined,
+            maturity_date: it.maturity_date ?? undefined,
+            raw: { raw_text: it.raw_text || "" },
+          },
+        });
+      });
+    });
+    setRows(newRows);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ocr.results]);
 
   // ----- 文件管理 -----
   const onPickFiles = (list: FileList | null) => {
@@ -69,62 +115,15 @@ export default function ImportOcr() {
   const clearFiles = () => {
     files.forEach((f) => URL.revokeObjectURL(f.preview));
     setFiles([]);
-    setParseResults([]);
-    setRows([]);
   };
 
-  // ----- 上传解析 -----
+  // ----- 启动解析 -----
   const startParse = async () => {
     if (files.length === 0) {
       toast.error("请先选择至少一张截图");
       return;
     }
-    setParsing(true);
-    try {
-      const r = await ImportApi.parse(files.map((f) => f.file), platformHint);
-      setParseResults(r.results);
-      // 把每张图的每个 item 摊平为表格行
-      const newRows: RowState[] = [];
-      r.results.forEach((res, fileIdx) => {
-        res.items.forEach((it, itemIdx) => {
-          const sug = it._suggestion;
-          const top = (it._candidates && it._candidates[0]) || null;
-          newRows.push({
-            fileIdx, itemIdx, origin: it,
-            bindAssetId: top?.asset_id ?? null,
-            decision: {
-              action: sug?.action || "create",
-              asset_id: top?.asset_id ?? null,
-              name: it.name || "",
-              code: it.code || "",
-              asset_type: it.asset_type,
-              market: defaultMarketFor(it.asset_type),
-              platform: res.platform || platformHint || "",
-              shares: it.shares ?? undefined,
-              delta_shares: sug?.delta_shares,
-              delta_amount: sug?.delta_amount,
-              avg_cost: it.avg_cost ?? undefined,
-              current_price: it.current_price ?? undefined,
-              market_value: it.market_value ?? undefined,
-              profit: it.profit ?? undefined,
-              profit_pct: it.profit_pct ?? undefined,
-              principal_amount: it.amount ?? it.market_value ?? undefined,
-              yield_7d: it.yield_7d ?? undefined,
-              expected_apr: it.expected_apr ?? undefined,
-              maturity_date: it.maturity_date ?? undefined,
-              raw: { raw_text: it.raw_text || "" },
-            },
-          });
-        });
-      });
-      setRows(newRows);
-      const totalErrs = r.results.filter((x) => x.error).length;
-      toast.success(`解析完成：${r.total} 项${totalErrs ? `（${totalErrs} 张异常）` : ""}`);
-    } catch (e: any) {
-      toast.error(`解析失败：${e?.message || e}`);
-    } finally {
-      setParsing(false);
-    }
+    await ocr.startParse(files.map((f) => f.file), platformHint);
   };
 
   // ----- 行编辑 -----
@@ -136,7 +135,6 @@ export default function ImportOcr() {
   const updateBind = (idx: number, candId: number | null) => {
     setRows((prev) => prev.map((r, i) => {
       if (i !== idx) return r;
-      // 切到"新建"时把 action 改成 create；否则给个合理的默认 action
       const action = candId == null ? "create" : (r.origin._suggestion?.action || "skip");
       return {
         ...r,
@@ -154,22 +152,11 @@ export default function ImportOcr() {
 
   const submit = async () => {
     if (rows.length === 0) return;
-    setCommitting(true);
     try {
-      const items = rows.map((r) => r.decision);
-      const r = await ImportApi.commit(items);
-      const msg = `已新建 ${r.created} 项 / 追加 ${r.appended} 项 / 跳过 ${r.skipped} 项`;
-      if (r.errors.length > 0) {
-        toast.error(`${msg}；但有 ${r.errors.length} 处错误：${r.errors[0]}`);
-      } else {
-        toast.success(msg);
-      }
-      // 提交完成清空
-      clearFiles();
-    } catch (e: any) {
-      toast.error(`提交失败：${e?.message || e}`);
-    } finally {
-      setCommitting(false);
+      await ocr.commit(rows.map((r) => r.decision));
+      clearFiles(); // 提交成功 → 顺手把上传的图片缩略图也清掉
+    } catch {
+      // toast 已在 hook 里出
     }
   };
 
@@ -233,17 +220,25 @@ export default function ImportOcr() {
         <div className="flex items-center gap-3">
           <button
             className="btn-primary"
-            disabled={parsing || files.length === 0}
+            disabled={ocr.running || files.length === 0}
             onClick={startParse}
           >
-            {parsing ? <><Loader2 className="w-4 h-4 animate-spin" /> 识别中…</> : <><ImageIcon className="w-4 h-4" /> 开始识别 ({files.length} 张)</>}
+            {ocr.running
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> 识别中…（{ocr.progress.finished}/{ocr.progress.total}）</>
+              : <><ImageIcon className="w-4 h-4" /> 开始识别 ({files.length} 张)</>}
           </button>
           {files.length > 0 && (
-            <button className="btn" onClick={clearFiles} disabled={parsing || committing}>
-              清空
+            <button className="btn" onClick={clearFiles} disabled={ocr.running || ocr.committing}>
+              清空文件
             </button>
           )}
-          {parseResults.length > 0 && (
+          {ocr.started && (
+            <button className="btn" onClick={ocr.reset} disabled={ocr.running || ocr.committing}
+                    title="清掉当前任务，重新开始">
+              <RotateCcw className="w-4 h-4" /> 重置任务
+            </button>
+          )}
+          {rows.length > 0 && (
             <span className="text-xs text-muted ml-auto">
               已解析：<span className="text-white">{rows.length} 项</span>
               {Object.entries(stats).filter(([, v]) => v > 0).map(([k, v]) => (
@@ -256,14 +251,26 @@ export default function ImportOcr() {
         </div>
 
         {/* 平台未识别提示 */}
-        {parseResults.some((r) => r.error) && (
+        {ocr.results.some((r) => r.error) && (
           <div className="rounded-lg border border-rose2/40 bg-rose2/5 p-3 text-xs text-rose2">
-            {parseResults.filter((r) => r.error).map((r, i) => (
+            {ocr.results.filter((r) => r.error).map((r, i) => (
               <div key={i}>· {r.file}: {r.error}</div>
             ))}
           </div>
         )}
       </div>
+
+      {/* ====== AI 思考过程 + 进度 ====== */}
+      {ocr.started && (
+        <ThoughtCard
+          running={ocr.running}
+          percent={ocr.percent}
+          finished={ocr.progress.finished}
+          total={ocr.progress.total}
+          thoughts={ocr.thoughts}
+          jobId={ocr.jobId}
+        />
+      )}
 
       {/* ====== 对账确认表 ====== */}
       {rows.length > 0 && (
@@ -272,10 +279,10 @@ export default function ImportOcr() {
             <h2 className="font-semibold">确认清单（共 {rows.length} 项）</h2>
             <button
               className="btn-primary"
-              disabled={committing || rows.length === 0}
+              disabled={ocr.committing || rows.length === 0}
               onClick={submit}
             >
-              {committing ? <><Loader2 className="w-4 h-4 animate-spin" /> 提交中…</> : <><CheckCircle2 className="w-4 h-4" /> 确认导入</>}
+              {ocr.committing ? <><Loader2 className="w-4 h-4 animate-spin" /> 提交中…</> : <><CheckCircle2 className="w-4 h-4" /> 确认导入</>}
             </button>
           </div>
           <div className="overflow-x-auto">
@@ -306,7 +313,7 @@ export default function ImportOcr() {
       )}
 
       {/* 视觉模型未配置提醒 */}
-      {parseResults.length === 0 && !parsing && files.length === 0 && (
+      {!ocr.started && files.length === 0 && (
         <div className="card mt-5 p-5 text-sm text-muted">
           <div className="flex items-center gap-2 mb-2">
             <AlertCircle className="w-4 h-4 text-amber2" />
@@ -316,10 +323,114 @@ export default function ImportOcr() {
             <li>到「设置 → 视觉模型」填入 base_url / model / api_key（推荐：阿里 qwen-vl-max 或智谱 GLM-4V）</li>
             <li>把支付宝、微信理财通、银行 App、券商 App 等平台的"持仓页"截图保存下来</li>
             <li>回到本页，多张截图一次性上传，AI 会自动识别并对账</li>
+            <li>识别过程中可以放心切到其他页面，回来不会丢进度</li>
           </ol>
         </div>
       )}
     </>
+  );
+}
+
+// ============== 子组件：AI 思考过程 + 进度 ==============
+
+function ThoughtCard({ running, percent, finished, total, thoughts, jobId }: {
+  running: boolean;
+  percent: number;
+  finished: number;
+  total: number;
+  thoughts: OcrThought[];
+  jobId: string | null;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickyBottomRef = useRef(true);
+
+  // 自动滚到底（除非用户主动往上滚）
+  useEffect(() => {
+    if (!stickyBottomRef.current || !scrollRef.current) return;
+    const el = scrollRef.current;
+    el.scrollTop = el.scrollHeight;
+  }, [thoughts.length]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickyBottomRef.current = distance < 24;
+  };
+
+  return (
+    <div className="card mt-5 overflow-hidden">
+      {/* 标题 + 进度条 */}
+      <div className="px-5 py-3 border-b border-line/60 bg-bg-soft/30">
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <Brain className={`w-5 h-5 ${running ? "text-accent animate-pulse" : "text-emerald2"}`} />
+          </div>
+          <h2 className="font-semibold text-sm">
+            AI 识别过程
+            {running && <span className="ml-2 text-xs text-muted">（处理中，可切换页面，不会中断）</span>}
+            {!running && total > 0 && <span className="ml-2 text-xs text-emerald2">完成</span>}
+          </h2>
+          <div className="ml-auto flex items-center gap-3 text-xs text-muted">
+            {jobId && <span className="font-mono opacity-60">job {jobId}</span>}
+            <span>{finished}/{total}</span>
+            <button
+              className="btn !h-7 !px-2 !text-xs"
+              onClick={() => setExpanded((x) => !x)}
+              title={expanded ? "收起" : "展开"}
+            >
+              {expanded ? <><EyeOff className="w-3 h-3" /> 收起</> : <><Eye className="w-3 h-3" /> 展开</>}
+            </button>
+          </div>
+        </div>
+
+        {/* 进度条 */}
+        <div className="mt-2 h-1.5 rounded-full bg-line/40 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${running ? "bg-gradient-to-r from-accent to-emerald2" : "bg-emerald2"}`}
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+      </div>
+
+      {/* 思考流 */}
+      {expanded && (
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="max-h-[280px] overflow-y-auto px-5 py-3 text-xs font-mono space-y-1 bg-[rgba(0,0,0,0.15)]"
+        >
+          {thoughts.length === 0 ? (
+            <div className="text-muted italic">等待视觉模型响应…</div>
+          ) : (
+            thoughts.map((t, i) => <ThoughtLine key={i} t={t} />)
+          )}
+          {running && (
+            <div className="text-muted italic flex items-center gap-2 pt-1">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              处理中…
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThoughtLine({ t }: { t: OcrThought }) {
+  const time = new Date(t.ts).toLocaleTimeString("zh-CN", { hour12: false });
+  let cls = "text-fg/80";
+  if (t.kind === "image_done") cls = "text-emerald2";
+  else if (t.kind === "image_error" || t.kind === "fatal") cls = "text-rose2";
+  else if (t.kind === "image_start") cls = "text-accent";
+  else if (t.kind === "start" || t.kind === "done") cls = "text-amber2 font-semibold";
+  else if (t.kind === "thought") cls = "text-muted";
+
+  return (
+    <div className={`leading-relaxed ${cls} whitespace-pre-wrap break-words`}>
+      <span className="opacity-50 mr-2">{time}</span>{t.text}
+    </div>
   );
 }
 

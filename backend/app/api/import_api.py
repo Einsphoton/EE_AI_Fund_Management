@@ -1,25 +1,33 @@
 """OCR 导入 API：批量上传截图 → 视觉模型解析 → 候选匹配 → 用户确认 → 入库。
 
-两段式接口：
-  1) POST /api/import/ocr/parse    上传图片 + 平台提示，返回解析结果 + 现有资产候选匹配
-     （此时不写库，给前端做编辑/对账）
-  2) POST /api/import/ocr/commit   提交用户已确认的清单：批量创建 Asset / 追加 Transaction / 写 Snapshot
+异步任务式接口（v2）：
+  1) POST /api/import/ocr/start         上传图片 → 立即返回 job_id，后台跑视觉模型
+  2) GET  /api/import/ocr/jobs/{id}/stream  SSE 推送思考过程 + 进度（支持重连/replay）
+  3) GET  /api/import/ocr/jobs/{id}     拉取最终结果（用户回到页面时一次性取齐）
+  4) GET  /api/import/ocr/jobs          最近任务列表
+  5) POST /api/import/ocr/commit        提交用户确认后的清单（事务性入库）
+
+兼容性：保留 /api/import/ocr/parse 同步路由，便于老调用方平滑过渡。
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
+import json
 from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import models
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from ..tz import now_local
 from ..agent import vision as vision_agent
 from ..services import snapshot_service
+from ..services import ocr_jobs
 
 router = APIRouter(prefix="/api/import", tags=["import"])
 
@@ -174,6 +182,120 @@ async def parse_screenshots(
             "error": r.get("error"),
         })
     return {"results": out, "total": sum(len(r["items"]) for r in out)}
+
+
+# ============================================================
+# /ocr/start + /jobs/{id}/stream + /jobs/{id} : 异步任务模式
+# ============================================================
+
+@router.post("/ocr/start")
+async def start_ocr_job(
+    files: list[UploadFile] = File(..., description="持仓页截图（支持多张）"),
+    platform_hint: str = Form("", description="平台提示"),
+) -> dict[str, Any]:
+    """上传 N 张截图 → 立即返回 job_id，后台异步跑视觉模型。
+
+    前端拿到 job_id 后用 /jobs/{id}/stream 订阅进度；切换路由再回来用 /jobs/{id}
+    拉取最终结果。
+    """
+    if not files:
+        raise HTTPException(400, "至少上传一张截图")
+
+    images: list[tuple[bytes, str, str]] = []
+    file_names: list[str] = []
+    for f in files:
+        b = await f.read()
+        if not b:
+            continue
+        mime = f.content_type or "image/jpeg"
+        images.append((b, mime, platform_hint))
+        file_names.append(f.filename or "unknown.jpg")
+
+    if not images:
+        raise HTTPException(400, "上传文件为空")
+
+    job = ocr_jobs.manager.create(
+        total=len(images),
+        platform_hint=platform_hint,
+        file_names=file_names,
+    )
+
+    # 后台跑：注入 match/suggest 函数 + db_factory（每张图独立 session）
+    asyncio.create_task(ocr_jobs.run_parse_job(
+        job, images,
+        db_factory=SessionLocal,
+        match_fn=_match_candidates,
+        suggest_fn=_suggest_action,
+    ))
+
+    return {"job_id": job.job_id, "snapshot": job.snapshot()}
+
+
+@router.get("/ocr/jobs/{job_id}/stream")
+async def stream_ocr_job(job_id: str):
+    """SSE 推送某个 OCR 任务的思考过程 + 进度。
+
+    重连友好：连上时先 replay 全部历史事件，让前端 UI 跳到当前状态。
+    """
+    job = ocr_jobs.manager.get(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} 不存在或已过期")
+
+    queue = await ocr_jobs.manager.subscribe(job)
+
+    async def gen():
+        try:
+            # 心跳：客户端切到后台后浏览器可能丢连接，每 15s 发一次注释帧保活
+            last_beat = asyncio.get_event_loop().time()
+            while True:
+                # 如果 job 已结束且队列空 → 推 [DONE] 然后退出
+                if job.status in ("done", "error") and queue.empty():
+                    yield "data: [DONE]\n\n"
+                    return
+
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    # 心跳：SSE 注释行（以 `:` 开头）保持连接
+                    now = asyncio.get_event_loop().time()
+                    if now - last_beat > 14:
+                        yield ": ping\n\n"
+                        last_beat = now
+        finally:
+            ocr_jobs.manager.unsubscribe(job, queue)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # nginx 关 buffer
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.get("/ocr/jobs/{job_id}")
+def get_ocr_job(job_id: str) -> dict[str, Any]:
+    """拉取某个 OCR 任务的快照 + 最终结果（如果已完成）。
+
+    用于：用户切走再回来，先调这个一次性挂回 UI。
+    """
+    job = ocr_jobs.manager.get(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} 不存在或已过期")
+    return {
+        "snapshot": job.snapshot(),
+        "events": job.events,
+        "result": job.result,
+    }
+
+
+@router.get("/ocr/jobs")
+def list_ocr_jobs(limit: int = 10) -> dict[str, Any]:
+    """最近 OCR 任务列表（用于前端启动时探测是否有进行中的任务可挂回）。"""
+    return {"items": ocr_jobs.manager.list_recent(limit=limit)}
 
 
 # ============================================================
