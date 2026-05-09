@@ -8,9 +8,43 @@ export const api = axios.create({
 api.interceptors.response.use(
   (r) => r,
   (err) => {
+    // FastAPI 在不同失败下 detail 形态不同：
+    //   - HTTPException → string
+    //   - Pydantic 422 → list[{loc, msg, type, ...}]
+    //   - 自定义异常处理器 → object
+    // axios 拦截器以前直接 `new Error(detail)`，遇到 list/object 会拼成 "[object Object]"，
+    // 用户看到这种没法排查；这里做归一化，尽量挤出能读懂的字符串。
+    const data = err?.response?.data;
+    const fmt = (d: any): string => {
+      if (d == null) return "";
+      if (typeof d === "string") return d;
+      if (Array.isArray(d)) {
+        // pydantic ValidationError 形态：[{loc:['body','items',0,'asset_type'], msg:'...', type:'...'}]
+        return d.map((it) => {
+          if (it && typeof it === "object") {
+            const loc = Array.isArray(it.loc) ? it.loc.join(".") : it.loc;
+            const msg = it.msg || it.message || JSON.stringify(it);
+            return loc ? `${loc}: ${msg}` : String(msg);
+          }
+          return String(it);
+        }).join("; ");
+      }
+      if (typeof d === "object") {
+        if (typeof d.detail !== "undefined") return fmt(d.detail);
+        if (typeof d.message === "string") return d.message;
+        if (typeof d.error === "string") return d.error;
+        try {
+          return JSON.stringify(d);
+        } catch {
+          return String(d);
+        }
+      }
+      return String(d);
+    };
     const msg =
-      err?.response?.data?.detail ||
-      err?.response?.data?.message ||
+      fmt(data?.detail) ||
+      fmt(data?.message) ||
+      fmt(data) ||
       err?.message ||
       "请求失败";
     return Promise.reject(new Error(msg));
@@ -193,6 +227,13 @@ export interface AppSettings {
     max_tokens?: number;
     /** HTTP 超时（秒） */
     timeout?: number;
+    /**
+     * 每分钟最大请求数（滑动窗口）。0 = 不限。
+     * NVIDIA NIM 免费 Kimi K2 ≈ 40，DeepSeek/通义 ≈ 60。设官方上限的 85%。
+     */
+    rpm_limit?: number;
+    /** 相邻两次请求最小硬间隔（秒）。已被 rpm_limit 覆盖大多数场景；兜底用。 */
+    min_interval_sec?: number;
     /** 投资者性格 id：balanced / conservative / aggressive / income / growth / value / trader */
     investor_profile?: string;
     /** 报告风格 id：pro / beginner */
@@ -218,6 +259,15 @@ export interface AppSettings {
     max_tokens?: number;
     timeout?: number;
     concurrency?: number;
+    /** 两张图之间最小间隔（秒），用于规避 RPM 限流；Kimi 免费档建议 25-30 */
+    /** 两张图之间最小间隔（秒）。已被 rpm_limit 覆盖大多数场景；保留作为兜底（次要）。 */
+    min_interval_sec?: number;
+    /**
+     * 每分钟最大请求数（滑动窗口算法）。0 = 不限。
+     * NVIDIA NIM 免费档 Kimi K2 ≈ 40，Kimi 官方免费 3，阿里 Qwen-VL ≈ 60。
+     * 推荐设成官方上限的 85%（留余量给重试），如 40 → 35。
+     */
+    rpm_limit?: number;
     /** 强制 JSON Mode（response_format=json_object），Kimi/GLM/Qwen-VL 都支持；不支持时自动降级 */
     json_mode?: boolean;
   };
@@ -248,7 +298,62 @@ export const Assets = {
     api.patch<Transaction>(`/assets/${id}/transactions/${txnId}`, p).then((r) => r.data),
   removeTxn: (id: number, txnId: number) => api.delete(`/assets/${id}/transactions/${txnId}`).then((r) => r.data),
   holdings: () => api.get<Holding[]>("/assets/summary/all").then((r) => r.data),
+  /**
+   * 智能补全资产缺失字段（首要用途：补 fund/etf 类代码）。
+   * 先打天天基金 API，没结果再让 LLM 兜底。
+   * apply=false 仅返回建议、不改库；用户确认后再调一次 apply=true。
+   */
+  enrich: (
+    id: number,
+    opts?: { fields?: string[]; apply?: boolean; useLLM?: boolean },
+  ) =>
+    api.post<EnrichResult>(`/assets/${id}/enrich`, null, {
+      params: {
+        ...(opts?.fields ? { fields: opts.fields.join(",") } : {}),
+        apply: opts?.apply !== false,
+        use_llm_fallback: opts?.useLLM !== false,
+      },
+      timeout: 60_000, // LLM 兜底可能需要几十秒
+    }).then((r) => r.data),
+  /**
+   * 无状态代码查询（不依赖已存在的 asset）。
+   * 用于 OCR 对账表里实时补全：用户编辑名字 → 一键查代码 → 填回输入框。
+   *
+   * 重要：**走独立 prefix `/api/enrich/fund-code`**，而不是 `/api/assets/lookup-code`。
+   * 历史上用 `/api/assets/lookup-code` 在生产部署里会遇到 405 Method Not Allowed —
+   * 因为 `/api/assets/{id}` 动态路由 / SPA fallback catch-all 会在某些 reload 情况下
+   * 把 POST 吞掉。换成独立的 `/api/enrich` 前缀根治此问题。
+   *
+   * useLLM 默认 false：天天基金 API 没结果时，普通 LLM（不带联网）瞎猜
+   * 反而误导用户，且 reasoning 模型可能陷入复读循环。仅在用户明确要求时启用。
+   */
+  lookupCode: (name: string, asset_type: AssetType = "fund", useLLM = false) =>
+    api.post<{ ok: boolean; suggestion?: EnrichSuggestion; reason?: string }>(
+      `/enrich/fund-code`,
+      null,
+      { params: { name, asset_type, use_llm_fallback: useLLM }, timeout: 30_000 },
+    ).then((r) => r.data),
 };
+
+export interface EnrichSuggestion {
+  value?: string;
+  code?: string;
+  matched_name?: string;
+  score: number;
+  source: "eastmoney" | "llm-fallback" | string;
+  alternates?: { code: string; name: string; score: number }[];
+}
+
+export interface EnrichResult {
+  ok: boolean;
+  asset_id: number;
+  updated: string[];
+  suggestions: Record<string, EnrichSuggestion>;
+  before?: Record<string, any>;
+  after?: Record<string, any>;
+  skipped_reason?: string;
+  error?: string;
+}
 
 export const Quotes = {
   byAsset: (id: number, days = 365) =>
@@ -373,6 +478,109 @@ export const DcaApi = {
   suggest: (id: number, base = 1000, fee_rate = 0.001) =>
     api.get<DcaSuggestion>(`/dca/suggest/${id}`, { params: { base, fee_rate } }).then((r) => r.data),
 };
+
+// =================== 危险操作（清库）===================
+
+export interface WipeResult {
+  ok: boolean;
+  include_settings: boolean;
+  total_rows_deleted: number;
+  deleted: Record<string, number>;
+  message: string;
+}
+
+export const Admin = {
+  /**
+   * 清空数据库。**高危操作**。
+   *
+   * @param includeSettings false=只清业务数据（资产/交易/快照/AI 建议）
+   *                        true=连同 AI 配置 / Skills 元数据一起清
+   *
+   * 后端要求显式传 `confirm` 字符串，避免误调；前端在用户输入"DELETE"
+   * 通过 modal 确认后才会真正发出。
+   */
+  wipeAll: (includeSettings = false) =>
+    api.post<WipeResult>("/admin/wipe-all", null, {
+      params: {
+        confirm: "I_UNDERSTAND_DELETE_EVERYTHING",
+        include_settings: includeSettings,
+      },
+      timeout: 60_000,
+    }).then((r) => r.data),
+
+  /**
+   * 导出资产数据为文件。直接触发浏览器下载，不返回数据。
+   *
+   * @param format  "json" = 完整备份（含交易 + 快照，可用于恢复）；
+   *                "csv"  = 资产扁平表（Excel 友好，不含交易快照）
+   * @param includeSnapshots 仅对 json 有意义；默认包含
+   */
+  exportDownload: (format: "json" | "csv" = "json", includeSnapshots = true): void => {
+    const qs = new URLSearchParams({
+      format,
+      include_snapshots: String(includeSnapshots),
+    });
+    // 直接用 <a download> 下载，而不是 axios blob 再 createObjectURL——
+    // 前者让浏览器原生决定保存位置，还能看到进度；后者会被内存占用
+    const a = document.createElement("a");
+    a.href = `/api/admin/export?${qs.toString()}`;
+    // 服务端 Content-Disposition 已经带了合理 filename，这里不再覆盖
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  },
+
+  /** 单独导出交易流水 CSV（扁平，便于筛选）。 */
+  exportTransactionsDownload: (): void => {
+    const a = document.createElement("a");
+    a.href = `/api/admin/export/transactions.csv`;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  },
+
+  /**
+   * 从 JSON 文件导入数据。
+   *
+   * @param file   前端选择的 File 对象（必须是 .json 备份）
+   * @param opts.mode  merge(默认) / replace(清空重建，需二次确认) / skip(只补新)
+   * @param opts.includeTransactions / includeSnapshots 是否导入子表
+   */
+  importData: (
+    file: File,
+    opts: {
+      mode?: "merge" | "replace" | "skip";
+      includeTransactions?: boolean;
+      includeSnapshots?: boolean;
+    } = {},
+  ) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("mode", opts.mode || "merge");
+    fd.append("include_transactions", String(opts.includeTransactions !== false));
+    fd.append("include_snapshots", String(opts.includeSnapshots !== false));
+    if (opts.mode === "replace") {
+      fd.append("confirm", "I_UNDERSTAND_REPLACE_ALL");
+    }
+    return api.post<ImportResult>("/admin/import", fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 120_000,
+    }).then((r) => r.data);
+  },
+};
+
+export interface ImportResult {
+  ok: boolean;
+  assets_created: number;
+  assets_updated: number;
+  assets_skipped: number;
+  transactions_added: number;
+  snapshots_added: number;
+  errors: string[];
+  replaced_counts?: Record<string, number>;
+}
 
 /** Streaming chat via fetch + SSE-like reader. */
 export async function chatStream(
@@ -520,6 +728,27 @@ export const ImportApi = {
     const r = await api.get(`/import/ocr/jobs`, { params: { limit }, timeout: 10_000 });
     return r.data;
   },
+  cancelJob: async (jobId: string): Promise<{ ok: boolean; status: string; already_finished?: boolean }> => {
+    const r = await api.post(`/import/ocr/jobs/${jobId}/cancel`, null, { timeout: 10_000 });
+    return r.data;
+  },
+  /**
+   * 导入 portfolio-ocr Skill 产物的 JSON 文件，跳过视觉模型；
+   * 返回结构与 parse 完全一致，前端可直接复用对账表。
+   */
+  importJson: async (
+    files: File[],
+    platformHint = "",
+  ): Promise<{ results: OcrParseResult[]; total: number }> => {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    if (platformHint) fd.append("platform_hint", platformHint);
+    const r = await api.post("/import/ocr/import-json", fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 30_000,
+    });
+    return r.data;
+  },
   commit: async (items: OcrCommitItem[]): Promise<{ created: number; appended: number; skipped: number; errors: string[] }> => {
     const r = await api.post("/import/ocr/commit", { items }, { timeout: 60_000 });
     return r.data;
@@ -530,7 +759,7 @@ export const ImportApi = {
 
 export interface OcrJobSnapshot {
   job_id: string;
-  status: "pending" | "parsing" | "done" | "error";
+  status: "pending" | "parsing" | "done" | "error" | "cancelled";
   total: number;
   finished: number;
   platform_hint: string;
@@ -539,6 +768,7 @@ export interface OcrJobSnapshot {
   created_at: number;
   finished_at: number | null;
   has_result: boolean;
+  cancelled?: boolean;
 }
 
 export type OcrJobEvent =
@@ -547,6 +777,8 @@ export type OcrJobEvent =
   | { type: "image_start"; index: number; total: number; file: string }
   | { type: "image_done"; index: number; file: string; platform: string; items_count: number; matched_count: number; elapsed: number }
   | { type: "image_error"; index: number; file: string; error: string; elapsed?: number }
+  | { type: "image_cancelled"; index: number; file: string; elapsed?: number }
   | { type: "progress"; finished: number; total: number }
   | { type: "done"; total_items: number; files: number; errors: number }
+  | { type: "cancelled"; total_items: number; files: number; cancelled_files: number; errors: number }
   | { type: "fatal"; error: string };
