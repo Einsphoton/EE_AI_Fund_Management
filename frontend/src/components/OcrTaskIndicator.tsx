@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from "react-router-dom";
-import { Camera, Check, X, Loader2 } from "lucide-react";
+import { Camera, Check, X, Loader2, Square } from "lucide-react";
 
 import { useOcrTask } from "../lib/ocrTask";
 
@@ -80,6 +80,25 @@ export default function OcrTaskIndicator() {
             </div>
           )}
         </div>
+
+        {ocr.running && (
+          <div
+            role="button"
+            tabIndex={0}
+            className="text-muted hover:text-rose2 p-1 rounded hover:bg-line/40 shrink-0"
+            onClick={(e) => { e.stopPropagation(); ocr.cancel(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                ocr.cancel();
+              }
+            }}
+            title="停止识别（已识别完的图片仍会保留）"
+          >
+            <Square className="w-3.5 h-3.5 fill-current" />
+          </div>
+        )}
 
         {done && (
           <div

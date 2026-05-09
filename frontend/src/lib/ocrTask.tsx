@@ -14,6 +14,7 @@ import {
   createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode,
 } from "react";
 import toast from "react-hot-toast";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   ImportApi, OcrJobSnapshot, OcrJobEvent, OcrParseResult, OcrCommitItem,
@@ -55,6 +56,10 @@ export interface OcrTaskState {
 interface OcrTaskCtxValue extends OcrTaskState {
   /** 启动一次新的解析任务（先取消旧的） */
   startParse: (files: File[], platformHint: string) => Promise<void>;
+  /** 直接从 portfolio-ocr Skill 产物 JSON 文件加载结果（跳过视觉模型） */
+  loadFromJson: (files: File[], platformHint: string) => Promise<void>;
+  /** 请求取消当前任务（保留已识别的部分供用户确认） */
+  cancel: () => Promise<void>;
   /** 把识别结果清空，回到上传态 */
   reset: () => void;
   /** 提交对账后的清单 */
@@ -91,6 +96,7 @@ export function useOcrTask(): OcrTaskCtxValue {
 const MAX_THOUGHTS = 800; // 思考日志最多保留多少条（防内存爆炸）
 
 export function OcrTaskProvider({ children }: { children: ReactNode }) {
+  const qc = useQueryClient();
   const [state, setState] = useState<OcrTaskState>(defaultState);
   const abortRef = useRef<AbortController | null>(null);
   const seenEventsRef = useRef<Set<string>>(new Set());
@@ -190,6 +196,30 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
         }));
         break;
 
+      case "image_cancelled":
+        patch((s) => ({
+          ...s,
+          thoughts: [
+            ...s.thoughts,
+            { ts, kind: "image_error", file: evt.file, text: `[${evt.file}] ⏹ 已取消` },
+          ],
+        }));
+        break;
+
+      case "cancelled":
+        patch((s) => ({
+          ...s,
+          thoughts: [
+            ...s.thoughts,
+            {
+              ts, kind: "done",
+              text: `⏹ 任务已取消：完成 ${evt.files - evt.cancelled_files} / ${evt.files} 张 · 共 ${evt.total_items} 项可确认`
+                  + (evt.errors ? `（${evt.errors} 张异常）` : ""),
+            },
+          ],
+        }));
+        break;
+
       case "fatal":
         patch((s) => ({
           ...s,
@@ -239,19 +269,31 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
     try {
       const r = await ImportApi.getJob(jobId);
       const snap: OcrJobSnapshot = r.snapshot;
-      if (snap.status === "done" && r.result) {
+      if ((snap.status === "done" || snap.status === "cancelled") && r.result) {
+        // 过滤掉"已取消"的占位 result（platform === "已取消"），用户只看真正识别成功的
+        const usableResults = r.result.results.filter((x) => x.platform !== "已取消");
         patch((s) => ({
           ...s,
           running: false,
           finishedAt: snap.finished_at ? snap.finished_at * 1000 : Date.now(),
-          results: r.result!.results,
+          results: usableResults,
           progress: { finished: snap.finished, total: snap.total },
         }));
-        const errCount = r.result.results.filter((x) => x.error).length;
-        toast.success(`解析完成：共 ${r.result.total} 项${errCount ? `（${errCount} 张异常）` : ""}`);
+        const errCount = usableResults.filter((x) => x.error).length;
+        const usableItems = usableResults.reduce((sum, r) => sum + r.items.length, 0);
+        if (snap.status === "cancelled") {
+          toast(`已取消：保留 ${usableResults.length} 张已识别（${usableItems} 项）`,
+            { icon: "⏹" });
+        } else {
+          toast.success(`解析完成：共 ${usableItems} 项${errCount ? `（${errCount} 张异常）` : ""}`);
+        }
       } else if (snap.status === "error") {
         patch((s) => ({ ...s, running: false, error: snap.error || "任务失败" }));
         toast.error(`OCR 任务失败：${snap.error}`);
+      } else if (snap.status === "cancelled") {
+        // 没有 result（可能一张都没成功）
+        patch((s) => ({ ...s, running: false }));
+        toast("已取消", { icon: "⏹" });
       }
     } catch (e: any) {
       // 任务可能被 GC，静默
@@ -322,7 +364,7 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
         handleEvent(ev);
       }
       const snap = r.snapshot;
-      if (snap.status === "done" || snap.status === "error") {
+      if (snap.status === "done" || snap.status === "error" || snap.status === "cancelled") {
         await fetchFinalResult(jobId);
         return;
       }
@@ -386,16 +428,115 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
     setState(defaultState);
   }, []);
 
+  /**
+   * 直接吃 portfolio-ocr Skill 产物的 JSON 文件，跳过视觉模型环节。
+   * 后端 /import/ocr/import-json 会返回与 OCR parse 同结构的 results（含候选 + 建议），
+   * 这里把它当成"瞬间完成的任务"，直接灌进 state，复用同一份对账表/确认入库流程。
+   */
+  const loadFromJson = useCallback(async (files: File[], platformHint: string) => {
+    if (state.running) {
+      toast.error("OCR 任务进行中，请先停止再导入 JSON");
+      return;
+    }
+    if (files.length === 0) {
+      toast.error("请先选择至少一份 JSON 文件");
+      return;
+    }
+    seenEventsRef.current = new Set();
+    setState({
+      ...defaultState,
+      started: true,
+      running: false, // 没有真正"识别"过程
+      jobId: null,
+      startedAt: Date.now(),
+      progress: { finished: files.length, total: files.length },
+      thoughts: [{
+        ts: Date.now(),
+        kind: "start",
+        text: `📥 从 ${files.length} 份 Skill JSON 文件加载持仓清单…`,
+      }],
+    });
+    try {
+      const r = await ImportApi.importJson(files, platformHint);
+      const results = r.results;
+      const errCount = results.filter((x) => x.error).length;
+      patch((s) => ({
+        ...s,
+        running: false,
+        finishedAt: Date.now(),
+        results,
+        thoughts: [
+          ...s.thoughts,
+          {
+            ts: Date.now(),
+            kind: "done",
+            text: `🎉 已加载 ${results.length} 份产物，共 ${r.total} 项${errCount ? `（${errCount} 份带瑕疵，详见下方）` : ""}`,
+          },
+          ...results
+            .filter((x) => x.error)
+            .map((x) => ({
+              ts: Date.now(),
+              kind: "image_error" as const,
+              file: x.file,
+              text: `[${x.file}] ⚠️ ${x.error}`,
+            })),
+        ],
+      }));
+      toast.success(`已导入 ${r.total} 项${errCount ? `（${errCount} 份有提示，请检查）` : ""}`);
+    } catch (e: any) {
+      patch((s) => ({
+        ...s,
+        running: false,
+        error: e?.message || String(e),
+        thoughts: [
+          ...s.thoughts,
+          { ts: Date.now(), kind: "fatal", text: `💥 导入 JSON 失败：${e?.message || e}` },
+        ],
+      }));
+      toast.error(`导入 JSON 失败：${e?.message || e}`);
+    }
+  }, [state.running]);
+
+
+
+  const cancel = useCallback(async () => {
+    const jobId = state.jobId;
+    if (!jobId || !state.running) return;
+    try {
+      await ImportApi.cancelJob(jobId);
+      toast("已请求停止，正在收尾…", { icon: "⏹" });
+      // 不立即关 SSE：让后端把 cancelled 事件推过来，UI 更连贯
+    } catch (e: any) {
+      toast.error(`取消失败：${e?.message || e}`);
+    }
+  }, [state.jobId, state.running]);
+
   const commit = useCallback(async (items: OcrCommitItem[]) => {
     setState((s) => ({ ...s, committing: true }));
     try {
       const r = await ImportApi.commit(items);
+      const total = r.created + r.appended + r.skipped + r.errors.length;
       const msg = `已新建 ${r.created} 项 / 追加 ${r.appended} 项 / 跳过 ${r.skipped} 项`;
       if (r.errors.length > 0) {
-        toast.error(`${msg}；但有 ${r.errors.length} 处错误：${r.errors[0]}`);
+        // 把所有错误汇总成长 toast，避免"看到 created=0 但只显示一条错误"的迷惑
+        const detail = r.errors.slice(0, 5).map((e) => `· ${e}`).join("\n");
+        const more = r.errors.length > 5 ? `\n…还有 ${r.errors.length - 5} 条错误，详见后端日志` : "";
+        toast.error(
+          `${msg}\n\n${r.errors.length} 处错误：\n${detail}${more}`,
+          { duration: 8000, style: { maxWidth: 480, whiteSpace: "pre-wrap" } },
+        );
+      } else if (r.created === 0 && r.appended === 0) {
+        // 全跳过 / 没真写入 → 用 warning 风格而非 success，避免误导
+        toast(
+          `没有任何资产被写入：${msg}。\n如果你期望有新建/追加，请检查"动作"列设置。`,
+          { icon: "⚠️", duration: 6000, style: { maxWidth: 480, whiteSpace: "pre-wrap" } },
+        );
       } else {
-        toast.success(msg);
+        toast.success(`${msg}（共 ${total} 项）`);
       }
+      // 关键：失效相关查询缓存，让"我的标的 / 仪表盘 / 资产详情"页面下次进入立即看到新数据
+      qc.invalidateQueries({ queryKey: ["holdings"] });
+      qc.invalidateQueries({ queryKey: ["assets"] });
       // 提交完成 → 清空状态
       setState(defaultState);
       seenEventsRef.current = new Set();
@@ -405,7 +546,7 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
       setState((s) => ({ ...s, committing: false }));
       throw e;
     }
-  }, []);
+  }, [qc]);
 
   const percent = state.progress.total > 0
     ? Math.min(100, Math.round((state.progress.finished / state.progress.total) * 100))
@@ -414,6 +555,8 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
   const value: OcrTaskCtxValue = {
     ...state,
     startParse,
+    loadFromJson,
+    cancel,
     reset,
     commit,
     percent,

@@ -60,7 +60,13 @@ def _build_cf_headers(base_url: str, ai_config: dict[str, Any]) -> dict[str, str
 
 
 def _get_openai_client(base_url: str, api_key: str, timeout_sec: int, ai_config: dict[str, Any]) -> OpenAI:
-    """取/建一个按配置指纹缓存的 OpenAI 客户端，跨标的共享以复用 TCP/TLS 连接。"""
+    """取/建一个按配置指纹缓存的 OpenAI 客户端。
+
+    注意：早期实现允许 keep-alive 复用 TCP/TLS 来跨标的省握手。但走 NVIDIA NIM /
+    Cloudflare Tunnel / 自建反代时，空闲连接经常被对端单方面 RST，下次复用会抛
+    APIConnectionError("Connection error")。每次新建连接虽然多 ~50ms，但稳定性
+    收益远大于成本——所以禁用 keep-alive 复用，仅缓存"客户端配置"层的对象。
+    """
     headers = _build_cf_headers(base_url, ai_config)
     key = (
         base_url,
@@ -74,7 +80,17 @@ def _get_openai_client(base_url: str, api_key: str, timeout_sec: int, ai_config:
         if cached is not None:
             return cached[0]
 
-        http_client = httpx.Client(timeout=timeout_sec, headers=headers)
+        # 关 keep-alive 复用，但保持并发能力（max_connections=10）
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(
+                connect=15.0,         # TCP+TLS 握手最多 15s
+                read=timeout_sec,     # 等模型响应
+                write=60.0,           # 上传 prompt
+                pool=15.0,            # 从池里拿连接
+            ),
+            limits=httpx.Limits(max_keepalive_connections=0, max_connections=10),
+            headers=headers,
+        )
         default_headers = {"User-Agent": headers.get("User-Agent", "")}
         if "CF-Access-Client-Id" in headers:
             default_headers["CF-Access-Client-Id"] = headers["CF-Access-Client-Id"]
@@ -85,6 +101,7 @@ def _get_openai_client(base_url: str, api_key: str, timeout_sec: int, ai_config:
             timeout=timeout_sec,
             http_client=http_client,
             default_headers=default_headers,
+            max_retries=0,  # 重试逻辑由本文件 run_agent 里的 backoff 循环负责
         )
         _CLIENT_CACHE[key] = (client, http_client)
         return client
@@ -611,7 +628,7 @@ def run_agent(
     # - JSON 解析失败：立即再试一次（reasoning 模型偶尔会输出不全）
     # - 业务错误（401/400 等）：不重试
     import time as _time
-    MAX_ATTEMPTS = 3
+    MAX_ATTEMPTS = 4
     for attempt in range(MAX_ATTEMPTS):
         try:
             client = _get_openai_client(base_url, api_key, timeout_sec, ai_config)
@@ -691,22 +708,55 @@ def run_agent(
         except Exception as e:
             last_err = e
             err_str = str(e)
-            # 识别可重试的网关/超时类错误
-            is_retryable = any(t in err_str for t in (
-                "524", "502", "503", "504",                  # CF / Nginx 5xx
-                "TimeoutError", "ReadTimeout", "ConnectError",
-                "Connection reset", "Connection aborted",
-                "origin_response_timeout",
+            err_low = err_str.lower()
+            err_type = type(e).__name__
+            # 识别可重试的瞬时错误：限流 / 网关 5xx / 连接断开
+            is_429 = (
+                "429" in err_str
+                or err_type == "RateLimitError"
+                or "ratelimit" in err_low.replace(" ", "").replace("_", "")
+                or "too many" in err_low
+            )
+            is_5xx = any(t in err_str for t in (
+                "524", "502", "503", "504", "500",       # CF / nginx / 上游 5xx
+                "Bad Gateway", "Service Unavailable", "Gateway Time", "origin_response_timeout",
             ))
-            print(f"[hermes] attempt {attempt+1}/{MAX_ATTEMPTS} failed: {type(e).__name__}: {err_str[:200]} "
-                  f"(retryable={is_retryable})")
+            is_conn = (
+                err_type in (
+                    "APIConnectionError", "APITimeoutError", "ConnectionError",
+                    "ConnectError", "ReadError", "RemoteProtocolError",
+                    "ReadTimeout", "ConnectTimeout", "TimeoutError",
+                )
+                or "connection error" in err_low
+                or "connection reset" in err_low
+                or "connection aborted" in err_low
+                or "remote end closed" in err_low
+                or "server disconnected" in err_low
+                or "broken pipe" in err_low
+            )
+            is_retryable = is_429 or is_5xx or is_conn
+            kind = "429 限流" if is_429 else ("5xx 网关错" if is_5xx else ("连接错" if is_conn else "其他"))
+            print(f"[hermes] attempt {attempt+1}/{MAX_ATTEMPTS} failed [{kind}]: "
+                  f"{err_type}: {err_str[:200]} (retryable={is_retryable})")
             if not is_retryable:
                 # 业务错误（401/400/模型不存在等）不重试
                 break
             if attempt + 1 < MAX_ATTEMPTS:
-                # 524 等网关错误一般是后端拥塞，等几秒让队列消化
-                backoff = (attempt + 1) * 5
-                print(f"[hermes] backoff {backoff}s before retry...")
+                # 退避：429 / 5xx 一般是后端拥塞或限流，前几次等久点让队列消化
+                # 1.5 / 4 / 9 / 20s（最多 4 次尝试）
+                backoffs = [1.5, 4.0, 9.0, 20.0]
+                backoff = backoffs[min(attempt, len(backoffs) - 1)]
+                # 429 优先用 Retry-After 头
+                if is_429:
+                    try:
+                        resp = getattr(e, "response", None)
+                        if resp is not None and hasattr(resp, "headers"):
+                            ra = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+                            if ra:
+                                backoff = max(0.5, min(60.0, float(ra)))
+                    except Exception:
+                        pass
+                print(f"[hermes] backoff {backoff:.1f}s before retry...")
                 _time.sleep(backoff)
             continue
 

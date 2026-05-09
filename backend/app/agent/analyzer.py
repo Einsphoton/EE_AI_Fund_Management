@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from typing import Any, AsyncIterator, Iterable, Optional
+from typing import Any, AsyncIterator, Callable, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,7 @@ from ..database import SessionLocal
 from ..services import quotes as quotes_service
 from ..services import holdings as holding_service
 from ..services import settings_service, skills_service
+from ..services import rate_limiter as rl_mod
 from ..tz import now_local
 from .hermes import run_agent
 
@@ -30,6 +31,14 @@ def _load_batch_context(db: Session) -> dict[str, Any]:
     skill_prompts = [skills_service.get_skill_prompt(s.skill_id) for s in skills]
     skill_label = ",".join(s.skill_id for s in skills) or "default"
     ai_cfg = settings_service.get(db, "ai") or {}
+    # 把 ai 的 RPM 限速也注册进全局 RateLimiter（key="ai"）。
+    # configure 是幂等的：每次批量分析都会按当前 ai 配置刷新一遍参数；
+    # 历史 window 会保留，避免改了配置就"忘掉"刚发出去的请求。
+    rl_mod.limiter.configure(
+        "ai",
+        rpm_limit=int(ai_cfg.get("rpm_limit", 0) or 0),
+        min_interval_sec=float(ai_cfg.get("min_interval_sec", 0) or 0),
+    )
     return {
         "skill_prompts": skill_prompts,
         "skill_label": skill_label,
@@ -43,8 +52,13 @@ async def _analyze_one_core(
     batch_id: str,
     source: str,
     ctx: dict[str, Any],
+    on_log: Optional[Callable[[str], Any]] = None,
 ) -> models.Advice:
-    """实际分析逻辑：拉行情 -> 调 LLM -> 落库。"""
+    """实际分析逻辑：拉行情 -> 限速 -> 调 LLM -> 落库。
+
+    on_log : 可选回调（同步或 awaitable），用于把"限速等待"等事件实时报给上层
+             （流式 API 会把它接到 SSE 队列）。批量调度场景可不传。
+    """
     quote = await quotes_service.fetch_quote(
         asset.asset_type.value, asset.market.value, asset.code, days=180,
     )
@@ -57,6 +71,23 @@ async def _analyze_one_core(
         "asset_type": asset.asset_type.value, "market": asset.market.value,
         "platform": asset.platform, "watch_only": asset.watch_only,
     }
+
+    # 限速：必要时等到下一个槽位再发请求
+    if rl_mod.limiter.is_active("ai"):
+        async def _on_waiting(secs: float, reason: str) -> None:
+            if on_log is not None:
+                msg = f"⏳ 限速等待 {secs:.1f}s（{reason}）"
+                try:
+                    r = on_log(msg)
+                    if asyncio.iscoroutine(r):
+                        await r
+                except Exception:
+                    pass
+        try:
+            await rl_mod.limiter.wait_for_slot("ai", on_waiting=_on_waiting)
+        except asyncio.CancelledError:
+            raise
+
     # 在线程池中执行同步的 OpenAI 调用，避免阻塞事件循环
     result = await asyncio.to_thread(
         run_agent,
@@ -142,15 +173,14 @@ async def analyze_all(batch_id: Optional[str] = None) -> int:
 def _resolve_concurrency(ai_cfg: dict[str, Any]) -> int:
     """从 ai 配置中读出并发度，做合法性夹断（1-16）。
 
-    默认 1（串行）：reasoning 模型（R1/Qwen3-thinking 等）单次请求就需要 60-90 秒，
-    且常经 Cloudflare（120s 超时硬限）。并发请求会让后端排队累积，整体反而更慢，
-    并且普遍触发 524 超时。
-    如果你用的是非 reasoning 模型（普通 Chat）+ 内网直连，可以手动调到 4-8。
+    默认 2：与 vision 一致，既能加速明显（1.6-1.8x）又不容易触发 RPM 限流。
+    服务端 RPM 紧张时把『每分钟最大请求数 (rpm_limit)』调小即可，limiter 会自动排队。
+    本地 Ollama 等无 RPM 限制 + 内网直连场景可手动调到 4-8。
     """
     try:
-        n = int((ai_cfg or {}).get("batch_concurrency") or 1)
+        n = int((ai_cfg or {}).get("batch_concurrency") or 2)
     except (TypeError, ValueError):
-        n = 1
+        n = 2
     return max(1, min(16, n))
 
 
@@ -226,7 +256,18 @@ async def analyze_all_stream() -> AsyncIterator[dict]:
                         "text": "🧠 Hermes-Lite 基于已启用 Skill 进行多因子分析…",
                         "asset_id": asset_id, "name": name,
                     })
-                    advice = await _analyze_one_core(_db, a, batch_id, "batch", ctx)
+
+                    # 把限速等待事件实时推给前端
+                    async def _on_wait_log(text: str) -> None:
+                        await queue.put({
+                            "type": "log", "text": text,
+                            "asset_id": asset_id, "name": name,
+                        })
+
+                    advice = await _analyze_one_core(
+                        _db, a, batch_id, "batch", ctx,
+                        on_log=_on_wait_log,
+                    )
                     await queue.put({
                         "type": "asset_done",
                         "asset_id": asset_id, "name": name, "code": code,

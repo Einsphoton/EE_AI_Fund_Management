@@ -9,13 +9,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Upload, Image as ImageIcon, X, CheckCircle2, AlertCircle, Loader2,
-  Brain, Eye, EyeOff, RotateCcw,
+  Brain, Eye, EyeOff, RotateCcw, Square, FileJson, Info,
+  ChevronDown, ChevronRight,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
 import PageHeader from "../components/PageHeader";
 import {
-  OcrItem, OcrCommitItem, AssetType, Market,
+  OcrItem, OcrCommitItem, AssetType, Market, Assets,
 } from "../api/client";
 import { ASSET_TYPE_META, metaOf } from "../lib/assetMeta";
 import { fmtMoney } from "../lib/format";
@@ -126,6 +127,20 @@ export default function ImportOcr() {
     await ocr.startParse(files.map((f) => f.file), platformHint);
   };
 
+  // ----- 通过 Skill JSON 文件导入（不走视觉模型） -----
+  const onPickJsonFiles = async (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    const arr = Array.from(list).filter((f) =>
+      f.name.toLowerCase().endsWith(".json") || f.type === "application/json"
+    );
+    if (arr.length === 0) {
+      toast.error("请选择 .json 文件（portfolio-ocr Skill 产物）");
+      return;
+    }
+    await ocr.loadFromJson(arr, platformHint);
+  };
+
+
   // ----- 行编辑 -----
   const updateRow = (idx: number, patch: Partial<RowState["decision"]>) => {
     setRows((prev) => prev.map((r, i) =>
@@ -164,7 +179,7 @@ export default function ImportOcr() {
     <>
       <PageHeader
         title="OCR 批量导入"
-        subtitle="上传持仓页截图，AI 自动识别并匹配到现有资产，确认后入库"
+        subtitle="上传持仓页截图让内置 AI 自动识别；或导入由 portfolio-ocr Skill 在其他 ChatBot 里生成的 JSON 文件"
       />
 
       {/* ====== 上传区 ====== */}
@@ -227,11 +242,35 @@ export default function ImportOcr() {
               ? <><Loader2 className="w-4 h-4 animate-spin" /> 识别中…（{ocr.progress.finished}/{ocr.progress.total}）</>
               : <><ImageIcon className="w-4 h-4" /> 开始识别 ({files.length} 张)</>}
           </button>
+          {ocr.running && (
+            <button
+              className="btn !text-rose2 hover:!border-rose2/60"
+              onClick={ocr.cancel}
+              title="停止识别。已识别完的图片仍会保留供你确认导入"
+            >
+              <Square className="w-4 h-4 fill-current" /> 停止识别
+            </button>
+          )}
           {files.length > 0 && (
             <button className="btn" onClick={clearFiles} disabled={ocr.running || ocr.committing}>
               清空文件
             </button>
           )}
+
+          {/* 通过 Skill JSON 文件导入：分隔线 + 入口 */}
+          <span className="text-muted text-xs">|</span>
+          <label
+            className={`btn ${ocr.running || ocr.committing ? "opacity-50 pointer-events-none" : ""}`}
+            title="不走视觉模型；上传 portfolio-ocr Skill 在网页 ChatBot 里跑出来的 JSON 文件，直接进入对账确认"
+          >
+            <FileJson className="w-4 h-4" />
+            导入 JSON 文件
+            <input
+              type="file" multiple accept="application/json,.json" className="hidden"
+              onChange={(e) => { onPickJsonFiles(e.target.files); e.target.value = ""; }}
+            />
+          </label>
+
           {ocr.started && (
             <button className="btn" onClick={ocr.reset} disabled={ocr.running || ocr.committing}
                     title="清掉当前任务，重新开始">
@@ -275,6 +314,12 @@ export default function ImportOcr() {
       {/* ====== 对账确认表 ====== */}
       {rows.length > 0 && (
         <div className="card mt-5 overflow-hidden">
+          {/* 平台候选 datalist：每行编辑器里的平台 input 共用 */}
+          <datalist id="ocr-platform-suggestions">
+            {PLATFORM_HINTS.filter(Boolean).map((p) => (
+              <option key={p} value={p} />
+            ))}
+          </datalist>
           <div className="flex items-center justify-between px-5 py-3 border-b border-line/60 bg-bg-soft/30">
             <h2 className="font-semibold">确认清单（共 {rows.length} 项）</h2>
             <button
@@ -314,17 +359,35 @@ export default function ImportOcr() {
 
       {/* 视觉模型未配置提醒 */}
       {!ocr.started && files.length === 0 && (
-        <div className="card mt-5 p-5 text-sm text-muted">
-          <div className="flex items-center gap-2 mb-2">
-            <AlertCircle className="w-4 h-4 text-amber2" />
-            <span className="text-white">使用前请先配置视觉模型</span>
+        <div className="card mt-5 p-5 text-sm text-muted space-y-4">
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle className="w-4 h-4 text-amber2" />
+              <span className="text-white">方式 A：App 内置 OCR（推荐日常使用）</span>
+            </div>
+            <ol className="list-decimal pl-6 space-y-1 text-xs">
+              <li>到「设置 → 视觉模型」填入 base_url / model / api_key（推荐：阿里 qwen-vl-max 或智谱 GLM-4V）</li>
+              <li>把支付宝、微信理财通、银行 App、券商 App 等平台的"持仓页"截图保存下来</li>
+              <li>回到本页，多张截图一次性上传，AI 会自动识别并对账</li>
+              <li>识别过程中可以放心切到其他页面，回来不会丢进度</li>
+            </ol>
           </div>
-          <ol className="list-decimal pl-6 space-y-1 text-xs">
-            <li>到「设置 → 视觉模型」填入 base_url / model / api_key（推荐：阿里 qwen-vl-max 或智谱 GLM-4V）</li>
-            <li>把支付宝、微信理财通、银行 App、券商 App 等平台的"持仓页"截图保存下来</li>
-            <li>回到本页，多张截图一次性上传，AI 会自动识别并对账</li>
-            <li>识别过程中可以放心切到其他页面，回来不会丢进度</li>
-          </ol>
+
+          <div className="border-t border-line/40 pt-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Info className="w-4 h-4 text-accent" />
+              <span className="text-white">方式 B：用 Skill 在任意 ChatBot 里手动跑，再导入 JSON</span>
+            </div>
+            <ol className="list-decimal pl-6 space-y-1 text-xs">
+              <li>打开仓库内 <code className="text-accent">skills/portfolio-ocr/SKILL.md</code>，复制里面的 System Prompt</li>
+              <li>贴到任意多模态 ChatBot（Kimi 网页版 / 通义千问 / ChatGPT-4V / Claude / 本地 Qwen-VL…），上传持仓截图</li>
+              <li>保存模型返回的 JSON 为 <code className="text-accent">.json</code> 文件</li>
+              <li>回到本页，点击右上角 <span className="text-white">「导入 JSON 文件」</span> 按钮选中 JSON，进入对账流程</li>
+            </ol>
+            <div className="text-[11px] text-muted mt-2">
+              适合：视觉模型限流严重 / 想用 App 没接入的模型做 OCR / 隐私隔离场景。
+            </div>
+          </div>
         </div>
       )}
     </>
@@ -445,23 +508,96 @@ function RowEditor({ row, onUpdate, onBind }: {
   const cands = it._candidates || [];
   const sug = it._suggestion;
   const meta = metaOf(row.decision.asset_type);
+  const [lookingUp, setLookingUp] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  // 是否需要"查代码"提示：行情类（fund/etf/stock）且 code 为空
+  const codeMissing = !row.decision.code &&
+    ["fund", "etf", "stock"].includes(row.decision.asset_type);
+
+  const lookupCode = async () => {
+    const name = (row.decision.name || "").trim();
+    if (!name) {
+      toast.error("请先填写名称");
+      return;
+    }
+    setLookingUp(true);
+    try {
+      const r = await Assets.lookupCode(name, row.decision.asset_type);
+      if (r.ok && r.suggestion?.code) {
+        const s = r.suggestion;
+        onUpdate({ code: s.code });
+        // 如果模型查回来的官方全名跟用户编辑的名字不太一样且置信度高，提示用户考虑替换
+        if (s.matched_name && s.matched_name !== name && s.score >= 0.9) {
+          toast.success(
+            `代码：${s.code}（来自 ${s.source === "eastmoney" ? "天天基金" : "AI"}，匹配 "${s.matched_name}"）`,
+            { duration: 5000 },
+          );
+        } else {
+          toast.success(
+            `代码：${s.code}（${s.source === "eastmoney" ? "天天基金" : "AI"} · ${(s.score * 100).toFixed(0)}%）`,
+          );
+        }
+      } else {
+        toast.error("没找到匹配的代码，请手动填写");
+      }
+    } catch (e: any) {
+      toast.error(`查询失败：${e?.message || e}`);
+    } finally {
+      setLookingUp(false);
+    }
+  };
 
   return (
+    <>
     <tr className="border-t border-line/40 hover:bg-bg-soft/20">
-      {/* 资产名 + 代码 */}
+      {/* 资产名 + 代码 + 展开按钮 */}
       <td className="px-3 py-2 align-top">
-        <input
-          className="input text-xs h-8 w-44"
-          value={row.decision.name || ""}
-          onChange={(e) => onUpdate({ name: e.target.value })}
-          placeholder="名称"
-        />
-        <input
-          className="input text-xs h-7 w-44 mt-1"
-          value={row.decision.code || ""}
-          onChange={(e) => onUpdate({ code: e.target.value })}
-          placeholder="代码"
-        />
+        <div className="flex items-start gap-1">
+          <button
+            type="button"
+            className="mt-1 text-muted hover:text-white shrink-0"
+            onClick={() => setExpanded((x) => !x)}
+            title={expanded ? "收起详情" : "展开：编辑平台 / 备注 / 起始日 / 到期日 等"}
+          >
+            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          </button>
+          <div className="flex-1 min-w-0">
+            <input
+              className="input text-xs h-8 w-44"
+              value={row.decision.name || ""}
+              onChange={(e) => onUpdate({ name: e.target.value })}
+              placeholder="名称"
+            />
+            <div className="flex items-center gap-1 mt-1">
+              <input
+                className={`input text-xs h-7 w-32 ${codeMissing ? "border-amber2/60" : ""}`}
+                value={row.decision.code || ""}
+                onChange={(e) => onUpdate({ code: e.target.value })}
+                placeholder={codeMissing ? "未识别" : "代码"}
+              />
+              {(["fund", "etf", "stock"].includes(row.decision.asset_type)) && (
+                <button
+                  type="button"
+                  className="btn !h-7 !px-1.5 !text-[10px]"
+                  onClick={lookupCode}
+                  disabled={lookingUp || !row.decision.name}
+                  title="多源并行查代码：天天基金 + 腾讯证券 + 新浪 + 雪球（支持 A股/港股/美股/基金/ETF）"
+                >
+                  {lookingUp ? <Loader2 className="w-3 h-3 animate-spin" /> : <>🔍 查码</>}
+                </button>
+              )}
+            </div>
+            {/* 平台直接显示在这里：高频字段不藏在展开里 */}
+            <input
+              className="input text-xs h-7 w-44 mt-1"
+              value={row.decision.platform || ""}
+              onChange={(e) => onUpdate({ platform: e.target.value })}
+              placeholder="平台（如：微信理财通）"
+              list="ocr-platform-suggestions"
+            />
+          </div>
+        </div>
       </td>
 
       {/* 类型 */}
@@ -556,6 +692,126 @@ function RowEditor({ row, onUpdate, onBind }: {
         {sug?.reason || "—"}
       </td>
     </tr>
+    {/* 展开行：更多字段编辑（平台/备注/起始日/到期日/购买日期/初始份额成本/特殊字段） */}
+    {expanded && (
+      <tr className="border-t border-line/40 bg-bg-soft/20">
+        <td colSpan={6} className="px-6 py-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+            <div>
+              <label className="block text-muted mb-1">购买日期 / 截图日期</label>
+              <input
+                className="input text-xs h-8 w-full"
+                type="date"
+                value={asDateInput(row.decision.snapshot_date)}
+                onChange={(e) => onUpdate({ snapshot_date: e.target.value || undefined })}
+              />
+              <div className="text-[10px] text-muted mt-0.5">追加交易/初始买入会用这个日期</div>
+            </div>
+
+            {/* 行情类才显示初始份额/成本（用于"新建"动作） */}
+            {row.decision.action === "create" && meta.hasShares && (
+              <>
+                <div>
+                  <label className="block text-muted mb-1">初始份额</label>
+                  <input
+                    className="input text-xs h-8 w-full font-mono"
+                    type="number" step="0.0001"
+                    value={row.decision.shares ?? ""}
+                    onChange={(e) => onUpdate({ shares: e.target.valueAsNumber || undefined })}
+                    placeholder="如 1234.5678"
+                  />
+                </div>
+                <div>
+                  <label className="block text-muted mb-1">平均成本</label>
+                  <input
+                    className="input text-xs h-8 w-full font-mono"
+                    type="number" step="0.0001"
+                    value={row.decision.avg_cost ?? ""}
+                    onChange={(e) => onUpdate({ avg_cost: e.target.valueAsNumber || undefined })}
+                    placeholder="单位净值/单价"
+                  />
+                </div>
+              </>
+            )}
+
+            {/* 货基/理财/现金/债券：本金 + 收益相关 */}
+            {!meta.hasShares && (
+              <div>
+                <label className="block text-muted mb-1">本金（元）</label>
+                <input
+                  className="input text-xs h-8 w-full font-mono"
+                  type="number" step="0.01"
+                  value={row.decision.principal_amount ?? ""}
+                  onChange={(e) => onUpdate({ principal_amount: e.target.valueAsNumber || undefined })}
+                />
+              </div>
+            )}
+
+            {meta.needsYield7d && (
+              <div>
+                <label className="block text-muted mb-1">7 日年化（%）</label>
+                <input
+                  className="input text-xs h-8 w-full font-mono"
+                  type="number" step="0.001"
+                  value={row.decision.yield_7d ?? ""}
+                  onChange={(e) => onUpdate({ yield_7d: e.target.valueAsNumber || undefined })}
+                />
+              </div>
+            )}
+
+            {meta.needsExpectedApr && (
+              <div>
+                <label className="block text-muted mb-1">预期年化（%）</label>
+                <input
+                  className="input text-xs h-8 w-full font-mono"
+                  type="number" step="0.001"
+                  value={row.decision.expected_apr ?? ""}
+                  onChange={(e) => onUpdate({ expected_apr: e.target.valueAsNumber || undefined })}
+                />
+              </div>
+            )}
+
+            {/* 理财 / 债券：起始 / 到期日 */}
+            {(row.decision.asset_type === "wealth" ||
+              row.decision.asset_type === "bond" ||
+              row.decision.asset_type === "money_fund") && (
+              <>
+                <div>
+                  <label className="block text-muted mb-1">起始日</label>
+                  <input
+                    className="input text-xs h-8 w-full"
+                    type="date"
+                    value={asDateInput(row.decision.start_date)}
+                    onChange={(e) => onUpdate({ start_date: e.target.value || undefined })}
+                  />
+                </div>
+                <div>
+                  <label className="block text-muted mb-1">到期日</label>
+                  <input
+                    className="input text-xs h-8 w-full"
+                    type="date"
+                    value={asDateInput(row.decision.maturity_date)}
+                    onChange={(e) => onUpdate({ maturity_date: e.target.value || undefined })}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* 备注：占满整行 */}
+            <div className="col-span-2 md:col-span-4">
+              <label className="block text-muted mb-1">备注</label>
+              <input
+                className="input text-xs h-8 w-full"
+                value={row.decision.note || ""}
+                onChange={(e) => onUpdate({ note: e.target.value })}
+                placeholder="如：朝朝宝活期 / Q3 到期 / 非保本浮动收益"
+              />
+            </div>
+          </div>
+        </td>
+      </tr>
+    )}
+    </>
   );
 }
 
@@ -568,6 +824,17 @@ function defaultMarketFor(t: AssetType): Market {
 function fmtNum(v: number | null | undefined): string {
   if (v == null) return "-";
   return Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+/**
+ * 把可能是 string / Date / undefined 的值，归一成 <input type="date"> 能吃的 "YYYY-MM-DD"。
+ * 保险起见容忍 ISO datetime，截前 10 位即可。
+ */
+function asDateInput(v: any): string {
+  if (!v) return "";
+  if (typeof v !== "string") return "";
+  // "2026-05-08T..." or "2026-05-08"
+  return v.length >= 10 ? v.slice(0, 10) : v;
 }
 
 function actionLabel(action: string): string {
