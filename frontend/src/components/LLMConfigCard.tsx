@@ -35,6 +35,10 @@ export interface LLMConfigState {
   timeout?: number;
   batch_concurrency?: number;     // AI 专有
   concurrency?: number;            // Vision 专有
+  /** RPM 限速（AI / Vision 共用语义） */
+  rpm_limit?: number;
+  /** 相邻两次请求最小硬间隔（秒） */
+  min_interval_sec?: number;
   cf_access_client_id?: string;    // 仅 AI 卡片维护，Vision 卡片复用 AI 的
   cf_access_client_secret?: string;
   cf_access_hosts?: string;
@@ -102,7 +106,7 @@ export default function LLMConfigCard({
 
   const concurrencyKey: "batch_concurrency" | "concurrency" =
     mode === "ai" ? "batch_concurrency" : "concurrency";
-  const concurrencyDefault = mode === "ai" ? 1 : 2;
+  const concurrencyDefault = mode === "ai" ? 2 : 2;
   const concurrencyMax = mode === "ai" ? 16 : 5;
 
   return (
@@ -196,7 +200,7 @@ export default function LLMConfigCard({
             />
             <p className="text-[10px] text-muted mt-1 leading-relaxed">
               {mode === "ai"
-                ? "同时分析的标的数。reasoning 模型 + Cloudflare 建议 1；普通模型可调 3-6。"
+                ? "同时分析的标的数。默认 2；本地 Ollama / 内网直连可调 4-8。配合下方 RPM 限速。"
                 : "并发解析的图片数。视觉模型计费贵，建议 1-2。"}
             </p>
           </div>
@@ -204,29 +208,75 @@ export default function LLMConfigCard({
             <label className="label">Max Tokens</label>
             <input
               className="input"
-              type="number" step="256" min={0} max={16384}
-              value={value.max_tokens ?? 4096}
-              onChange={(e) => set({ max_tokens: Math.max(0, e.target.valueAsNumber || 0) })}
+              type="number"
+              step={mode === "vision" ? 512 : 256}
+              min={mode === "vision" ? 1024 : 0}
+              max={mode === "vision" ? 32768 : 16384}
+              value={value.max_tokens ?? (mode === "vision" ? 8192 : 4096)}
+              onChange={(e) => {
+                const v = e.target.valueAsNumber || 0;
+                if (mode === "vision") {
+                  // 视觉场景禁止 0：服务端会把 0 当成"立即停止输出"
+                  set({ max_tokens: Math.max(1024, v || 8192) });
+                } else {
+                  set({ max_tokens: Math.max(0, v) });
+                }
+              }}
             />
             <p className="text-[10px] text-muted mt-1 leading-relaxed">
               {mode === "ai"
-                ? "推荐 4096：reasoning 模型需要 3000+ 写思考；0 = 不限。"
-                : "单图响应 token 上限，4096 足够覆盖 10-15 项持仓。"}
+                ? "推荐 4096：reasoning 模型需要 3000+ 写思考；0 = 用模型默认。"
+                : "OCR 任务必须 ≥ 1024（推荐 8192-12000）；多模态服务端不接受 0。"}
             </p>
           </div>
           <div>
             <label className="label">Timeout (秒)</label>
             <input
               className="input"
-              type="number" step="10" min={10} max={600}
+              type="number" step="30" min={10} max={1800}
               value={value.timeout ?? 180}
               onChange={(e) => set({ timeout: Math.max(10, e.target.valueAsNumber || 180) })}
             />
             <p className="text-[10px] text-muted mt-1 leading-relaxed">
-              单次调用超时。本地 Ollama 慢模型可调大。
+              单次调用超时。本地 Ollama 慢模型 / 多模态长输出建议 600-1200。
             </p>
           </div>
         </div>
+
+        {/* RPM 限速（AI / Vision 都需要；Vision 已在 Settings.tsx 单独有，这里仅 AI 模式显示） */}
+        {mode === "ai" && (
+          <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-line/40">
+            <div>
+              <label className="label">每分钟最大请求数 (RPM)</label>
+              <input
+                className="input"
+                type="number" step="5" min={0} max={1000}
+                value={value.rpm_limit ?? 0}
+                onChange={(e) => set({ rpm_limit: Math.max(0, Math.min(1000, e.target.valueAsNumber || 0)) })}
+                placeholder="0 = 不限"
+              />
+              <p className="text-[10px] text-muted mt-1 leading-relaxed">
+                滑动窗口节流，<strong className="text-white/80">推荐设官方上限的 85%</strong>：
+                NVIDIA NIM 免费 Kimi → <strong className="text-white/80">35</strong>，
+                DeepSeek/通义 → 50，本地 Ollama → 0。比硬性间隔聪明，能利用 burst。
+              </p>
+            </div>
+            <div>
+              <label className="label">最小间隔 (秒，兜底)</label>
+              <input
+                className="input"
+                type="number" step="1" min={0} max={120}
+                value={value.min_interval_sec ?? 0}
+                onChange={(e) => set({ min_interval_sec: Math.max(0, Math.min(120, e.target.valueAsNumber || 0)) })}
+                placeholder="0 = 不限"
+              />
+              <p className="text-[10px] text-muted mt-1 leading-relaxed">
+                两次调用最少间隔。<strong className="text-white/80">通常留 0</strong>，已被 RPM 覆盖。
+                仅当代理明确要求"两次至少 N 秒"时启用。两个限速谁严格谁说了算。
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ============ 思考 / Reasoning（仅 ai 模式） ============ */}

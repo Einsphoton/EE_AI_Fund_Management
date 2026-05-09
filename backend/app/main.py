@@ -35,6 +35,8 @@ from .api import advice_api
 from .api import dca_api
 from .api import chat_api
 from .api import import_api
+from .api import enrich as enrich_api
+from .api import admin as admin_api
 
 
 @asynccontextmanager
@@ -87,6 +89,8 @@ app.include_router(advice_api.router)
 app.include_router(dca_api.router)
 app.include_router(chat_api.router)
 app.include_router(import_api.router)
+app.include_router(enrich_api.router)
+app.include_router(admin_api.router)
 
 
 @app.get("/api/health")
@@ -100,11 +104,32 @@ def health():
     except Exception:
         prompt_has_commentary = False
         prompt_len = 0
+
+    # 列出所有注册的路由，用于诊断"405 Method Not Allowed"类问题：
+    # 把浏览器里看到失败的那个 URL 在这里搜一下，能立刻看到进程内到底有没有这个
+    # 端点、以及它允许的 HTTP methods 是什么。
+    routes_info: list[dict] = []
+    for r in app.routes:
+        path = getattr(r, "path", None)
+        methods = sorted(getattr(r, "methods", []) or [])
+        if path and methods:
+            routes_info.append({"path": path, "methods": methods})
+    # 只返回 /api 下的路由（前端需要看的），避免把 StaticFiles / SPA fallback 刷屏
+    api_routes = [r for r in routes_info if r["path"].startswith("/api")]
+
     return {
         "status": "ok",
         "app": settings.app_name,
         "prompt_has_commentary": prompt_has_commentary,
         "prompt_len": prompt_len,
+        # 用于检查关键端点是否已加载（前端 OCR 查码 / 自动补码会打到这两条）
+        "has_enrich_fund_code": any(
+            r["path"] == "/api/enrich/fund-code" for r in api_routes
+        ),
+        "has_admin_wipe": any(
+            r["path"] == "/api/admin/wipe-all" for r in api_routes
+        ),
+        "api_routes": api_routes,
     }
 
 

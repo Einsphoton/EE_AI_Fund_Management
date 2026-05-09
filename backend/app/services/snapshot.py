@@ -75,8 +75,26 @@ async def _fetch_qt(symbol: str) -> list[str] | None:
     try:
         async with httpx.AsyncClient(timeout=8.0, headers=HEADERS, follow_redirects=True) as client:
             r = await client.get(url)
-        r.encoding = "gbk"
-        text = r.text or ""
+        # 腾讯证券 qt API 历史一直返回 GBK；偶发会返回 UTF-8（域名灰度时）。
+        # 先按 GBK 解，若结果里没找到目标 symbol 标识，再按 UTF-8 兜底重解一次
+        # —— 否则下游正则会拿到乱码字符串然后静默返回 None，看起来像"行情查不到"。
+        try:
+            content = r.content or b""
+        except Exception:
+            content = b""
+        text = ""
+        for enc in ("gbk", "utf-8", "gb18030"):
+            try:
+                cand = content.decode(enc, errors="strict")
+            except UnicodeDecodeError:
+                continue
+            if f"v_{symbol}" in cand:
+                text = cand
+                break
+        if not text:
+            # 全都解不出 / 都不含目标 symbol：用 errors="replace" 兜底，
+            # 下游正则匹配不到也无所谓，不会污染日志
+            text = content.decode("gbk", errors="replace")
     except Exception:
         return None
     m = re.search(rf'v_{re.escape(symbol)}="([^"]*)"', text)

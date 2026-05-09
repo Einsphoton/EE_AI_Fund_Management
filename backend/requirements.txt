@@ -11,3 +11,6 @@ python-multipart>=0.0.9,<0.1
 python-dotenv>=1.0.0,<2
 openai>=1.30.0,<2
 beautifulsoup4>=4.12.0,<5
+# OCR 截图导入：图片预处理（降采样 + 重压），降低多模态请求延迟。可选；缺失时跳过压缩。
+Pillow>=10.0.0,<12
+
