@@ -75,6 +75,48 @@ def create_asset(payload: schemas.AssetCreate, db: Session = Depends(get_db)):
     return asset
 
 
+# ============================================================
+# 静态路径优先（必须放在 /{asset_id} 等动态路由之前）
+# Starlette 路由是按注册顺序匹配的；把 /lookup-code 这类静态路径放在
+# /{asset_id} 系列之后，会被某些 starlette 版本的"先动态后静态"路径
+# 解析当成 asset_id="lookup-code" 走到 GET /{asset_id} → 404 / 422，
+# 用户在前端看到「查询失败：Not Found」就是这种坑。
+# ============================================================
+
+@router.post("/lookup-code")
+async def lookup_code(
+    name: str,
+    asset_type: str = "fund",
+    use_llm_fallback: bool = False,   # 默认 off：LLM 没联网时容易瞎猜，反而误导用户
+    db: Session = Depends(get_db),
+):
+    """无状态查代码：根据基金/ETF 名直接返回建议代码，不依赖已存在的 asset。
+
+    主要用于 OCR 对账表"代码缺失"行的实时补全，用户在确认入库前就能看到代码。
+
+    use_llm_fallback 默认 false：天天基金 API 是结构化数据库，找不到的基本就是没有；
+    这种时候让普通 LLM 瞎猜（不带联网）反而容易出错，且某些 reasoning 模型还可能
+    陷入复读循环烧 RPM。前端默认不启用，仅在用户主动开关时才传 true。
+    """
+    from ..services.enrichment import _enrich_fund_code, _llm_guess_fund_code
+    if not name or not name.strip():
+        raise HTTPException(400, "name is required")
+
+    # 主源
+    if asset_type in ("fund", "etf"):
+        sug = await _enrich_fund_code(name.strip())
+        if sug:
+            return {"ok": True, "suggestion": sug}
+
+    # 兜底
+    if use_llm_fallback:
+        sug = await _llm_guess_fund_code(db, name.strip())
+        if sug:
+            return {"ok": True, "suggestion": sug}
+
+    return {"ok": False, "suggestion": None, "reason": "no candidate found"}
+
+
 @router.get("/{asset_id}", response_model=schemas.AssetOut)
 def get_asset(asset_id: int, db: Session = Depends(get_db)):
     asset = db.get(models.Asset, asset_id)
@@ -114,6 +156,43 @@ def delete_asset(asset_id: int, db: Session = Depends(get_db)):
     db.delete(asset)
     db.commit()
     return {"ok": True}
+
+
+# -------------- enrichment --------------
+@router.post("/{asset_id}/enrich")
+async def enrich_asset_endpoint(
+    asset_id: int,
+    fields: str | None = None,        # 逗号分隔；不传 = 自动检测缺失字段
+    apply: bool = True,                # False = 仅返回建议不写库（前端预览用）
+    use_llm_fallback: bool = True,
+    db: Session = Depends(get_db),
+):
+    """通用资产字段补全（目前主要用于 OCR 导入后补 fund 代码）。
+
+    流程：
+    1. 自动检测（或按用户给定的 fields）哪些字段缺失/占位
+    2. 主源走天天基金 fundsuggest API（基金名 → 代码）
+    3. API 没结果 → 让 LLM 兜底猜（用现有 ai 配置）
+    4. apply=True 直接更新数据库；apply=False 只返回建议供前端确认
+
+    返回结构见 enrichment.enrich_asset() 文档。
+    """
+    from ..services.enrichment import enrich_asset
+    field_list = None
+    if fields:
+        field_list = [f.strip() for f in fields.split(",") if f.strip()]
+    result = await enrich_asset(
+        db, asset_id,
+        fields=field_list,
+        apply=apply,
+        use_llm_fallback=use_llm_fallback,
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "enrich failed")
+    return result
+
+
+
 
 
 # -------------- transactions --------------
