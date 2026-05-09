@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EE Fund Manager - Portfolio OCR Output",
+  "description": "持仓页截图识别后的标准化 JSON。供 App 「OCR 批量导入 → 导入 JSON 文件」入口直接吃。",
+  "type": "object",
+  "required": ["items"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "可选；用于标记产物版本。当前版本 'ee-fund-mgr/portfolio-ocr@1'",
+      "enum": ["ee-fund-mgr/portfolio-ocr@1"]
+    },
+    "platform": {
+      "type": ["string", "null"],
+      "description": "识别到的平台名（如 微信理财通 / 支付宝财富 / 招商银行 / 富途 等）。未识别填 '未知'。"
+    },
+    "screenshot_date": {
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "截图日期，YYYY-MM-DD 或 null"
+    },
+    "items": {
+      "type": "array",
+      "description": "持仓项数组。识别到不是持仓页时为 []。",
+      "items": {
+        "type": "object",
+        "required": ["name", "asset_type"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "完整产品名"
+          },
+          "code": {
+            "type": ["string", "null"],
+            "description": "基金代码 / 股票代码；货基/理财/现金等没有代码时填 null"
+          },
+          "asset_type": {
+            "type": "string",
+            "enum": ["fund", "stock", "etf", "money_fund", "wealth", "cash", "bond"],
+            "description": "资产类型枚举"
+          },
+          "shares": {
+            "type": ["number", "null"],
+            "description": "份额/股数；货基/理财/现金可填 null"
+          },
+          "amount": {
+            "type": ["number", "null"],
+            "description": "持有金额（元），货基/理财/现金必填"
+          },
+          "avg_cost": { "type": ["number", "null"] },
+          "current_price": { "type": ["number", "null"] },
+          "market_value": { "type": ["number", "null"] },
+          "profit": { "type": ["number", "null"] },
+          "profit_pct": {
+            "type": ["number", "null"],
+            "description": "收益率（%）数字，1.23 表示 1.23%"
+          },
+          "yield_7d": {
+            "type": ["number", "null"],
+            "description": "货基 7 日年化(%)"
+          },
+          "expected_apr": {
+            "type": ["number", "null"],
+            "description": "理财预期年化(%)"
+          },
+          "maturity_date": {
+            "type": ["string", "null"],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          }
+        }
+      }
+    }
+  }
+}
