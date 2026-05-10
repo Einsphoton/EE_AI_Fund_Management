@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from openai import OpenAI
 
-from .profiles import get_profile_prompt, get_report_style_prompt
+from .profiles import get_profile_prompt, get_profile_public, get_report_style_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +120,7 @@ SYSTEM_PROMPT = (
     '  "action": "buy" 或 "hold" 或 "sell",\n'
     '  "confidence": 0 到 1 之间的浮点数,\n'
     '  "summary": "必填；15-40 字的一句话结论，点明核心动作与理由，不能为空",\n'
+    '  "profile_note": "必填；40-90 字：说明本结论如何按投资者性格优化，例如仓位、节奏、止盈止损或持有周期",\n'
     '  "score": {\n'
     '    "technical": 0 到 100 的整数,\n'
     '    "fundamental": 0 到 100 的整数,\n'
@@ -137,6 +138,12 @@ SYSTEM_PROMPT = (
     '  "target_price": 数字或 null,\n'
     '  "stop_loss": 数字或 null\n'
     "}\n"
+    "\n"
+    "### 投资者性格适配要求\n"
+    "如果 SYSTEM 中提供了『投资者性格』，summary、action、confidence、advice、commentary、time_horizon、target_price、stop_loss 必须围绕该性格调整：\n"
+    "- 同一个标的对稳健型/收息型应更重视回撤、现金流和止损；对进攻型/短线型可更重视趋势、突破和交易节奏。\n"
+    "- profile_note 必须直接解释：为什么当前动作、仓位比例、止盈止损或持有周期适合该投资者性格。\n"
+    "- 不允许只写通用建议；每个资产的 advice 至少包含一条与投资者性格强相关的执行细节。\n"
     "\n"
     "### commentary 字段写作要求（这是用户最看重的部分，请认真写）\n"
     "你必须把 commentary 写得像一个真人分析师的微信长消息，而不是教科书式的描述。包含但不限于：\n"
@@ -156,6 +163,7 @@ SYSTEM_PROMPT = (
     "- 数值字段必须是裸数字，不要写 \"约 3.5\" / \"3.5 元\" / \"3.5%\" 这种带单位/文字的值；不确定就填 null。\n"
     "- advice 和 commentary 字段里的 Markdown 是字符串值的一部分，换行写成 \\n，\" 转义成 \\\"，保证 JSON 合法。\n"
     "- summary 字段必须独立成章、不能为空字符串——否则会被视为分析失败。\n"
+    "- profile_note 不能为空，必须点名当前投资者性格下的优化逻辑。\n"
     "- commentary 不能为空且不能少于 150 字——它是这次分析的核心交付物。\n"
     "- risks / pros 每项 20 字以内，共 2-4 条。\n"
     "- 若信息不足，target_price / stop_loss 填 null，不要瞎猜。"
@@ -187,10 +195,26 @@ def build_prompt(
 
     system_parts = [SYSTEM_PROMPT]
     if investor_profile_prompt:
-        system_parts.append("### 投资者性格（必须遵守，它会直接影响 action/advice/止盈止损）\n" + investor_profile_prompt)
+        system_parts.append("### 投资者性格（必须遵守，它会直接影响 action/summary/advice/commentary/profile_note/止盈止损）\n" + investor_profile_prompt)
     if report_style_prompt:
         system_parts.append("### 报告风格（影响 summary/advice/risks/pros 的用词）\n" + report_style_prompt)
     system_msg = "\n\n".join(system_parts)
+
+    feature_labels = {
+        "note": "备注",
+        "yield_7d": "7日年化",
+        "expected_apr": "预期年化",
+        "start_date": "起息日",
+        "maturity_date": "到期日",
+        "principal_amount": "配置本金",
+        "is_principal_guaranteed": "是否保本",
+    }
+    feature_lines = []
+    for key, label in feature_labels.items():
+        val = asset.get(key)
+        if val is not None and val != "":
+            feature_lines.append(f"- {label}: {val}")
+    feature_text = "\n".join(feature_lines) if feature_lines else "- 无"
 
     user_msg = (
         f"## 标的\n"
@@ -199,6 +223,7 @@ def build_prompt(
         f"- 类型: {asset.get('asset_type')} / 市场: {asset.get('market')}\n"
         f"- 平台: {asset.get('platform')}\n"
         f"- 仅观察: {asset.get('watch_only')}\n\n"
+        f"## 资产特征（用于按投资者性格校准建议）\n{feature_text}\n\n"
         f"## 持仓\n"
         f"- 持有份额/股: {holding.get('total_shares')}\n"
         f"- 持仓成本: {holding.get('total_cost')}\n"
@@ -256,6 +281,18 @@ def _heuristic(points: list[dict], holding: dict) -> dict:
         "score": {"technical": tech, "fundamental": 50, "sentiment": 50, "risk": 55},
         "detail": "（Hermes-Lite 启发式回退结果，未调用大模型。）",
     }
+
+
+def _default_profile_note(profile_meta: dict[str, str], action: str = "") -> str:
+    """当模型漏写 profile_note 时，用当前投资者性格生成可展示兜底说明。"""
+    name = profile_meta.get("name") or "当前投资者性格"
+    tagline = profile_meta.get("tagline") or "风险偏好"
+    action_text = {
+        "buy": "买入节奏",
+        "sell": "减仓节奏",
+        "hold": "持有观察",
+    }.get(action, "操作节奏")
+    return f"已按{name}优化：结合『{tagline}』调整{action_text}、仓位幅度、止盈止损与持有周期。"
 
 
 def _strip_json_noise(s: str) -> str:
@@ -466,6 +503,7 @@ def _salvage_from_text(text: str) -> dict:
     # 尝试从裸文本里用正则抓字段——LLM 就算吐注释或漏逗号，通常字段本身还是完整的
     patterns = {
         "summary": r'"summary"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+        "profile_note": r'"profile_note"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
         "advice": r'"advice"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
         "commentary": r'"commentary"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
         "action": r'"action"\s*:\s*"([^"]+)"',
@@ -540,6 +578,7 @@ def _coerce_result(parsed: dict, fallback: dict) -> dict:
         "action": str(parsed.get("action", "hold")).lower(),
         "confidence": max(0.0, min(1.0, float(_num(parsed.get("confidence"), 0.5) or 0.5))),
         "summary": summary,
+        "profile_note": _nonempty_str(parsed.get("profile_note")),
         "score": score,
         "fundamentals": _str(parsed.get("fundamentals"), ""),
         "macro": _str(parsed.get("macro"), ""),
@@ -607,14 +646,27 @@ def run_agent(
         print(f"[hermes] max_tokens={max_tokens} 偏小 (thinking={thinking_mode} 下限 {REASONING_FLOOR})，已自动抬高")
         max_tokens = REASONING_FLOOR
 
+    # 把投资性格 + 报告风格注入 system prompt，并把性格元信息随分析结果落库。
+    profile_id = (ai_config or {}).get("investor_profile")
+    profile_meta = get_profile_public(profile_id)
+    profile_prompt_raw = get_profile_prompt(profile_id) or get_profile_prompt(profile_meta.get("id"))
+    profile_prompt = (
+        f"当前投资者性格：{profile_meta['name']}（{profile_meta['tagline']}）\n{profile_prompt_raw}"
+        if profile_prompt_raw else ""
+    )
+    style_prompt = get_report_style_prompt((ai_config or {}).get("report_style"))
+
     if not base_url or not api_key:
         result = _heuristic(points, holding)
         detail = result.pop("detail", "")
-        return {**result, "detail": detail, "skill_used": skill_used_label or "fallback"}
-
-    # 把投资性格 + 报告风格注入 system prompt
-    profile_prompt = get_profile_prompt((ai_config or {}).get("investor_profile"))
-    style_prompt = get_report_style_prompt((ai_config or {}).get("report_style"))
+        profile_note = _default_profile_note(profile_meta, str(result.get("action", "")))
+        return {
+            **result,
+            "profile_note": profile_note,
+            "investor_profile": profile_meta,
+            "detail": (f"【性格适配】{profile_note}\n" + detail).strip(),
+            "skill_used": skill_used_label or "fallback",
+        }
 
     last_err = None
     parsed = None
@@ -796,10 +848,17 @@ def run_agent(
                 "skill_used": skill_used_label or f"{model}(partial)",
             }
         fallback_detail = fallback.pop("detail", "")
+        profile_note = _default_profile_note(profile_meta, str(fallback.get("action", "")))
         return {
             **fallback,
-            "detail": (fallback_detail + f"\n[调用大模型失败] {err_str}{length_hint}"
-                       + (f"\n[LLM 原文片段]\n{salvage_source[:800]}" if salvage_source else "")),
+            "profile_note": profile_note,
+            "investor_profile": profile_meta,
+            "detail": (
+                fallback_detail
+                + f"\n【性格适配】{profile_note}"
+                + f"\n[调用大模型失败] {err_str}{length_hint}"
+                + (f"\n[LLM 原文片段]\n{salvage_source[:800]}" if salvage_source else "")
+            ),
             "skill_used": skill_used_label or "fallback",
         }
 
@@ -836,6 +895,7 @@ def run_agent(
 
     return {
         **coerced,
+        "investor_profile": profile_meta,
         "detail": detail_text,
         "skill_used": skill_used_effective,
     }

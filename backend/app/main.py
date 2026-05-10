@@ -33,6 +33,7 @@ from .api import settings_api
 from .api import skills_api
 from .api import advice_api
 from .api import dca_api
+from .api import todos_api
 from .api import chat_api
 from .api import import_api
 from .api import enrich as enrich_api
@@ -87,6 +88,7 @@ app.include_router(settings_api.router)
 app.include_router(skills_api.router)
 app.include_router(advice_api.router)
 app.include_router(dca_api.router)
+app.include_router(todos_api.router)
 app.include_router(chat_api.router)
 app.include_router(import_api.router)
 app.include_router(enrich_api.router)

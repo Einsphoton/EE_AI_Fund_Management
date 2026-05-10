@@ -83,6 +83,10 @@ class Asset(Base):
         "HoldingSnapshot", back_populates="asset",
         cascade="all, delete-orphan", order_by="HoldingSnapshot.snapshot_date.desc()",
     )
+    todo_items = relationship(
+        "TodoItem", back_populates="asset",
+        cascade="all, delete-orphan", order_by="TodoItem.created_at.desc()",
+    )
 
 
 class Transaction(Base):
@@ -151,6 +155,27 @@ class Skill(Base):
     enabled = Column(Boolean, default=True)
     config = Column(JSON, default={})
     installed_at = Column(DateTime, default=now_local)
+
+
+class TodoItem(Base):
+    """用户待确认动作：定投到期、追投、调仓、建仓、卖出等统一进入这里。"""
+    __tablename__ = "todo_items"
+
+    id = Column(Integer, primary_key=True)
+    todo_type = Column(String(32), default="manual", index=True)       # dca_due / rebalance / buy / sell ...
+    status = Column(String(16), default="pending", index=True)         # pending / accepted / rejected
+    asset_id = Column(Integer, ForeignKey("assets.id", ondelete="CASCADE"), nullable=True, index=True)
+    title = Column(String(160), nullable=False)
+    description = Column(Text, default="")
+    action = Column(String(32), default="")                            # buy / sell / hold / skip
+    payload = Column(JSON, default={})                                  # 建议详情与默认交易参数
+    result = Column(JSON, default={})                                   # 用户确认后的结果
+    due_date = Column(DateTime, default=now_local, index=True)
+    created_at = Column(DateTime, default=now_local)
+    updated_at = Column(DateTime, default=now_local, onupdate=now_local)
+    resolved_at = Column(DateTime, nullable=True)
+
+    asset = relationship("Asset", back_populates="todo_items")
 
 
 class Advice(Base):

@@ -313,7 +313,7 @@ export default function SettingsPage() {
             <User className="w-4 h-4 text-accent" /> 投资者性格
           </h3>
           <p className="text-xs text-muted mb-4">
-            AI 在生成建议时会结合你的风险偏好：稳健型偏保守、进攻型偏积极、收息养老型优先现金流……选一个最贴近你的。
+            AI 会把这里作为硬约束：影响每个资产的结论、仓位节奏、止盈止损和持有周期，并在分析卡里显示「性格适配」说明。
           </p>
 
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">

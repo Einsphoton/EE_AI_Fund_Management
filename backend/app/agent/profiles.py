@@ -156,6 +156,15 @@ def get_profile_prompt(profile_id: str | None) -> str:
     return ""
 
 
+def get_profile_public(profile_id: str | None) -> dict[str, str]:
+    """返回用于落库和前端展示的投资者性格元信息。"""
+    for p in INVESTOR_PROFILES:
+        if p["id"] == profile_id:
+            return {"id": p["id"], "name": p["name"], "tagline": p["tagline"]}
+    p = INVESTOR_PROFILES[0]
+    return {"id": p["id"], "name": p["name"], "tagline": p["tagline"]}
+
+
 def get_report_style_prompt(style_id: str | None) -> str:
     if not style_id:
         return ""

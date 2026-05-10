@@ -305,11 +305,6 @@ export default function AssetDetail() {
         open={dcaOpen}
         onClose={() => setDcaOpen(false)}
         asset={a}
-        onAccept={(d) => {
-          setEditingTxn(null);
-          setTxnPrefill(d);
-          setTxnOpen(true);
-        }}
       />
     </>
   );

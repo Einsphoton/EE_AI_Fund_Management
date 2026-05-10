@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 _WIPE_CONFIRM = "I_UNDERSTAND_DELETE_EVERYTHING"
 
 # 业务数据表（默认清理范围）
-_BIZ_TABLES = ["transactions", "holding_snapshots", "advices", "assets"]
+_BIZ_TABLES = ["transactions", "holding_snapshots", "advices", "todo_items", "assets"]
 # 设置/扩展表（仅在 include_settings=True 时清）
 _SETTINGS_TABLES = ["app_settings", "skills"]
 

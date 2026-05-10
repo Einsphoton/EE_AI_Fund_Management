@@ -316,12 +316,14 @@ def import_json(
                 "transactions": db.query(models.Transaction).count(),
                 "holding_snapshots": db.query(models.HoldingSnapshot).count(),
                 "advices": db.query(models.Advice).count(),
+                "todo_items": db.query(models.TodoItem).count(),
                 "assets": db.query(models.Asset).count(),
             }
             # 顺序重要：子表先清（虽然有 CASCADE，但保险起见）
             db.execute(text("DELETE FROM transactions"))
             db.execute(text("DELETE FROM holding_snapshots"))
             db.execute(text("DELETE FROM advices"))
+            db.execute(text("DELETE FROM todo_items"))
             db.execute(text("DELETE FROM assets"))
             db.flush()
             result.replaced_counts = before

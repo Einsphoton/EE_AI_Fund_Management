@@ -80,6 +80,34 @@ class TransactionOut(TransactionBase):
     asset_id: int
 
 
+# ---------- Todo ----------
+class TodoResolvePayload(BaseModel):
+    decision: str = Field(..., description="accept | reject")
+    shares: float | None = None
+    price: float | None = None
+    fee: float | None = None
+    trade_date: datetime | None = None
+    note: str | None = None
+
+
+class TodoOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    todo_type: str
+    status: str
+    asset_id: int | None = None
+    title: str
+    description: str = ""
+    action: str = ""
+    payload: dict = {}
+    result: dict = {}
+    due_date: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: datetime | None = None
+    asset: AssetOut | None = None
+
+
 # ---------- Settings ----------
 class SettingPayload(BaseModel):
     key: str

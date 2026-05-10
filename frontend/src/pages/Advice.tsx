@@ -618,6 +618,13 @@ function SplitView({ groups, selectedBatch, onSelect, selectedGroup, nameOf, onA
 //  子组件
 // ===========================================================================
 
+function profileName(a: AdviceT): string {
+  const profile = a.extra?.investor_profile;
+  if (!profile) return "";
+  if (typeof profile === "string") return profile;
+  return profile.name || "";
+}
+
 function BatchStats({ stats, count }: { stats: BatchGroup["stats"]; count: number }) {
   return (
     <div className="flex items-center gap-3 text-[11px] text-muted shrink-0">
@@ -650,6 +657,7 @@ function AdviceRow({ a, nameOf, onAsset }: {
   onAsset: (id: number | null) => void;
 }) {
   const [showDetail, setShowDetail] = useState(false);
+  const profile = profileName(a);
   return (
     <div className="px-4 py-3 hover:bg-line/10 transition">
       <div className="flex items-start gap-3">
@@ -667,12 +675,17 @@ function AdviceRow({ a, nameOf, onAsset }: {
               {actionLabel(a.action)}
             </span>
             <span className="text-[11px] text-muted">{(a.confidence * 100).toFixed(0)}%</span>
+            {profile && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded border border-accent/30 bg-accent/5 text-accent-soft">
+                {profile}
+              </span>
+            )}
             <span className="text-[11px] text-muted ml-auto truncate max-w-[40%]">
               via {a.skill_used}
             </span>
           </div>
           <p className="text-sm mt-1 leading-relaxed text-white/90">{a.summary}</p>
-          {(a.extra?.commentary || a.extra?.advice || a.detail) && (
+          {(a.extra?.profile_note || a.extra?.commentary || a.extra?.advice || a.detail) && (
             <>
               <button
                 className="text-[11px] text-muted hover:text-accent-soft mt-1.5 transition"
@@ -682,6 +695,12 @@ function AdviceRow({ a, nameOf, onAsset }: {
               </button>
               {showDetail && (
                 <div className="mt-2 bg-bg/40 rounded-lg p-3 border border-line/40 space-y-3">
+                  {a.extra?.profile_note && (
+                    <div>
+                      <div className="text-[10px] text-accent font-medium mb-1">投资者性格适配{profile ? ` · ${profile}` : ""}</div>
+                      <p className="text-[11px] text-white/75 leading-relaxed">{a.extra.profile_note}</p>
+                    </div>
+                  )}
                   {a.extra?.commentary && (
                     <div>
                       <div className="text-[10px] text-accent font-medium mb-1">AI 深度点评</div>
@@ -717,6 +736,7 @@ function AdviceMiniCard({ a, nameOf, onAsset }: {
   nameOf: (id: number | null) => string;
   onAsset: (id: number | null) => void;
 }) {
+  const profile = profileName(a);
   const actionCls =
     a.action === "buy" ? "bg-emerald2/10 border-emerald2/30"
       : a.action === "sell" ? "bg-rose2/10 border-rose2/30"

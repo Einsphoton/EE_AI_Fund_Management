@@ -70,6 +70,13 @@ async def _analyze_one_core(
         "name": asset.name, "code": asset.code,
         "asset_type": asset.asset_type.value, "market": asset.market.value,
         "platform": asset.platform, "watch_only": asset.watch_only,
+        "note": asset.note,
+        "yield_7d": asset.yield_7d,
+        "expected_apr": asset.expected_apr,
+        "start_date": asset.start_date.isoformat() if asset.start_date else None,
+        "maturity_date": asset.maturity_date.isoformat() if asset.maturity_date else None,
+        "principal_amount": asset.principal_amount,
+        "is_principal_guaranteed": asset.is_principal_guaranteed,
     }
 
     # 限速：必要时等到下一个槽位再发请求
@@ -96,7 +103,8 @@ async def _analyze_one_core(
     )
 
     extra_keys = ("score", "fundamentals", "macro", "micro", "risks", "pros",
-                  "advice", "commentary", "time_horizon", "target_price", "stop_loss")
+                  "advice", "commentary", "profile_note", "investor_profile",
+                  "time_horizon", "target_price", "stop_loss")
     extra = {k: result.get(k) for k in extra_keys if k in result}
     advice = models.Advice(
         asset_id=asset.id,

@@ -30,6 +30,7 @@ export default function AnalysisCard({ advice, holding }: Props) {
   const skillUsed = (advice.skill_used || "").toLowerCase();
   const isHeuristic = skillUsed.includes("fallback");
   const isPartial = skillUsed.includes("partial");
+  const investorProfile = normalizeInvestorProfile(extra.investor_profile);
 
   return (
     <div className="space-y-4">
@@ -77,6 +78,14 @@ export default function AnalysisCard({ advice, holding }: Props) {
               {isPartial && (
                 <span className="text-[10px] px-2 py-0.5 rounded-md border border-amber2/40 text-amber2 bg-amber2/5" title="LLM 返回解析失败，已从原文救援部分字段">
                   部分解析
+                </span>
+              )}
+              {investorProfile && (
+                <span
+                  className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md border border-accent/40 text-accent-soft bg-accent/10"
+                  title={investorProfile.tagline || "生成该建议时使用的投资者性格"}
+                >
+                  <Shield className="w-3 h-3" /> 按{investorProfile.name}优化
                 </span>
               )}
             </div>
@@ -135,7 +144,21 @@ export default function AnalysisCard({ advice, holding }: Props) {
         </div>
       )}
 
-      {/* ===== 3. AI 深度点评（commentary，主观长文，最显眼）===== */}
+      {/* ===== 3. 投资者性格适配 ===== */}
+      {extra.profile_note && (
+        <div className="rounded-xl border border-accent/30 bg-accent/5 p-4">
+          <div className="flex items-center gap-2 mb-1.5">
+            <Shield className="w-4 h-4 text-accent" />
+            <span className="text-sm font-medium">投资者性格适配</span>
+            {investorProfile && (
+              <span className="text-[10px] text-muted">{investorProfile.name} · {investorProfile.tagline}</span>
+            )}
+          </div>
+          <p className="text-xs leading-relaxed text-white/85">{extra.profile_note}</p>
+        </div>
+      )}
+
+      {/* ===== 4. AI 深度点评（commentary，主观长文，最显眼）===== */}
       {extra.commentary && (
         <div className="rounded-2xl border-2 border-accent/40 bg-gradient-to-br from-accent/15 via-accent/5 to-bg-soft/30 p-5 shadow-lg shadow-accent/10">
           <div className="flex items-center gap-2 mb-3">
@@ -224,9 +247,25 @@ export default function AnalysisCard({ advice, holding }: Props) {
 // 工具函数 & 子组件
 // ---------------------------------------------------------------------------
 
+type InvestorProfileMeta = { id?: string; name: string; tagline?: string };
+
+function normalizeInvestorProfile(v: unknown): InvestorProfileMeta | null {
+  if (!v) return null;
+  if (typeof v === "string") return { name: v };
+  if (typeof v !== "object") return null;
+  const obj = v as Record<string, unknown>;
+  const name = typeof obj.name === "string" ? obj.name : "";
+  if (!name) return null;
+  return {
+    id: typeof obj.id === "string" ? obj.id : undefined,
+    name,
+    tagline: typeof obj.tagline === "string" ? obj.tagline : undefined,
+  };
+}
+
 export function hasStructured(extra: Advice["extra"]): boolean {
   if (!extra) return false;
-  return !!(extra.fundamentals || extra.macro || extra.micro ||
+  return !!(extra.fundamentals || extra.macro || extra.micro || extra.profile_note ||
     (extra.risks && extra.risks.length) || (extra.pros && extra.pros.length) ||
     extra.advice || extra.commentary);
 }

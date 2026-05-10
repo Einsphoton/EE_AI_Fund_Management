@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
-import { TrendingDown, TrendingUp, Minus, AlertTriangle, Sparkles, Check } from "lucide-react";
+import { TrendingDown, TrendingUp, Minus, AlertTriangle, Sparkles, ListTodo } from "lucide-react";
 import Modal from "./Modal";
 import { Asset, DcaApi, DcaSuggestion } from "../api/client";
 
@@ -8,8 +9,6 @@ interface Props {
   open: boolean;
   onClose: () => void;
   asset: Asset | null;
-  /** 用户接受建议后，把数据带回上层去填 TxnForm */
-  onAccept: (data: { shares: number; price: number; fee: number; trade_date: string; note: string }) => void;
 }
 
 const DECISION_META: Record<DcaSuggestion["decision"], {
@@ -21,11 +20,13 @@ const DECISION_META: Record<DcaSuggestion["decision"], {
   skip:       { label: "本期暂缓",   color: "text-rose2",    icon: AlertTriangle, bg: "bg-rose2/10 border-rose2/40" },
 };
 
-export default function DcaModal({ open, onClose, asset, onAccept }: Props) {
+export default function DcaModal({ open, onClose, asset }: Props) {
+  const qc = useQueryClient();
   const [base, setBase] = useState(1000);
   const [feeRate, setFeeRate] = useState(0.001);
   const [data, setData] = useState<DcaSuggestion | null>(null);
   const [loading, setLoading] = useState(false);
+  const [creatingTodo, setCreatingTodo] = useState(false);
 
   const fetchSuggest = async () => {
     if (!asset) return;
@@ -50,19 +51,19 @@ export default function DcaModal({ open, onClose, asset, onAccept }: Props) {
   const fmt = (v: number | null | undefined, d = 4) =>
     v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
 
-  const handleAccept = () => {
-    if (!data || data.suggest_amount <= 0 || !data.last_price) {
-      toast.error("当前不建议买入，无法填充");
-      return;
+  const createTodo = async () => {
+    if (!asset || !data) return;
+    setCreatingTodo(true);
+    try {
+      await DcaApi.createTodo(asset.id, base, feeRate);
+      toast.success("已加入 To-do，等待你确认是否采纳");
+      qc.invalidateQueries({ queryKey: ["todos"] });
+      onClose();
+    } catch (e: any) {
+      toast.error(e?.message || "加入 To-do 失败");
+    } finally {
+      setCreatingTodo(false);
     }
-    onAccept({
-      shares: data.suggest_shares,
-      price: data.last_price,
-      fee: data.estimated_fee,
-      trade_date: new Date().toISOString().slice(0, 10),
-      note: `定投·${data.decision === "buy_more" ? "加大" : data.decision === "buy_less" ? "减少" : "正常"}（基础¥${base}）`,
-    });
-    onClose();
   };
 
   return (
@@ -76,10 +77,10 @@ export default function DcaModal({ open, onClose, asset, onAccept }: Props) {
           <button className="btn" onClick={onClose}>关闭</button>
           <button
             className="btn-primary"
-            disabled={!data || data.suggest_amount <= 0 || loading}
-            onClick={handleAccept}
+            disabled={!data || loading || creatingTodo}
+            onClick={createTodo}
           >
-            <Check className="w-4 h-4" /> 接受建议并填入交易表单
+            <ListTodo className="w-4 h-4" /> {creatingTodo ? "加入中…" : "加入 To-do 等待确认"}
           </button>
         </>
       }

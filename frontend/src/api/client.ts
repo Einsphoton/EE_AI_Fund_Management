@@ -167,6 +167,10 @@ export interface AdviceExtra {
     sentiment?: number;
     risk?: number;
   };
+  /** 本条建议如何按当前投资者性格做了仓位/节奏/止盈止损优化。 */
+  profile_note?: string;
+  /** 生成该建议时使用的投资者性格。 */
+  investor_profile?: { id?: string; name?: string; tagline?: string } | string;
   fundamentals?: string;
   macro?: string;
   micro?: string;
@@ -208,6 +212,32 @@ export interface DcaSuggestion {
   trend_factor: number;
   decision: "buy_more" | "buy_normal" | "buy_less" | "skip";
   reason: string;
+}
+
+export interface TodoItem {
+  id: number;
+  todo_type: "dca_due" | string;
+  status: "pending" | "accepted" | "rejected" | string;
+  asset_id: number | null;
+  title: string;
+  description: string;
+  action: "buy" | "sell" | "hold" | "skip" | string;
+  payload: Record<string, any>;
+  result: Record<string, any>;
+  due_date: string | null;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+  asset?: Asset | null;
+}
+
+export interface TodoResolvePayload {
+  decision: "accept" | "reject";
+  shares?: number;
+  price?: number;
+  fee?: number;
+  trade_date?: string;
+  note?: string;
 }
 
 export interface ChatMsg {
@@ -492,6 +522,15 @@ export async function runAllStream(
 export const DcaApi = {
   suggest: (id: number, base = 1000, fee_rate = 0.001) =>
     api.get<DcaSuggestion>(`/dca/suggest/${id}`, { params: { base, fee_rate } }).then((r) => r.data),
+  createTodo: (id: number, base = 1000, fee_rate = 0.001) =>
+    api.post<TodoItem>(`/dca/todo/${id}`, null, { params: { base, fee_rate } }).then((r) => r.data),
+};
+
+export const TodoApi = {
+  list: (status: "pending" | "accepted" | "rejected" | "all" = "pending") =>
+    api.get<TodoItem[]>("/todos", { params: { status } }).then((r) => r.data),
+  resolve: (id: number, payload: TodoResolvePayload) =>
+    api.post<TodoItem>(`/todos/${id}/resolve`, payload).then((r) => r.data),
 };
 
 // =================== 危险操作（清库）===================
