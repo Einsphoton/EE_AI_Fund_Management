@@ -146,11 +146,20 @@ def _fix_vision_performance_defaults() -> None:
                 cfg["auto_fill_code"] = True
                 changes.append("auto_fill_code→true（OCR 完自动查代码，已有 5s 硬超时）")
 
-            # wall_timeout：单图总耗时硬上限。字段不存在 → 90s。
-            # 这是"模型复读死循环"的总防线；超过就强制结束当前图。
-            if "wall_timeout" not in cfg:
-                cfg["wall_timeout"] = 90
-                changes.append("wall_timeout→90s（单图硬超时，防死循环拖死整批）")
+            # wall_timeout：单图总耗时硬上限。旧版本默认 90s，容易与用户在设置页填的
+            # timeout（例如 NVIDIA NIM 排队时设 580s）不一致；默认跟随 timeout。
+            try:
+                cur_timeout = int(cfg.get("timeout") or 300)
+            except (TypeError, ValueError):
+                cur_timeout = 300
+            try:
+                cur_wall_timeout = int(cfg.get("wall_timeout") or 0)
+            except (TypeError, ValueError):
+                cur_wall_timeout = 0
+            if "wall_timeout" not in cfg or (cur_wall_timeout <= 90 and cur_timeout > cur_wall_timeout):
+                cfg["wall_timeout"] = cur_timeout
+                changes.append(f"wall_timeout→{cur_timeout}s（跟随视觉 Timeout，避免 90s 提前放弃）")
+
 
             # content_hardcap：content 累积字符硬上限。字段不存在 → 20000。
             if "content_hardcap" not in cfg:

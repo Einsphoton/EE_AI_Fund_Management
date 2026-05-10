@@ -143,24 +143,72 @@ async def test_ai(p: TestAiPayload):
             assert r is not None
             if r.status_code == 200:
                 data = r.json()
-                ids = []
-                if isinstance(data, dict):
-                    for it in data.get("data") or []:
+                ids: list[str] = []
+
+                def _append_ids(payload: Any) -> None:
+                    if not isinstance(payload, dict):
+                        return
+                    for it in payload.get("data") or []:
                         if isinstance(it, dict) and it.get("id"):
-                            ids.append(it["id"])
+                            mid = str(it["id"])
+                            if mid not in ids:
+                                ids.append(mid)
+
+                _append_ids(data)
+
+                # 兼容部分 OpenAI-compatible 服务的分页形态。NVIDIA NIM 的模型列表较长，
+                # 旧实现只返回前 50 个，用户会误以为模型不全；这里尽量拉全且不再截断。
+                page_target = target
+                page_payload = data if isinstance(data, dict) else {}
+                for _page in range(8):
+                    next_url = ""
+                    if isinstance(page_payload, dict):
+                        links = page_payload.get("links") or {}
+                        raw_next = page_payload.get("next") or (links.get("next") if isinstance(links, dict) else "")
+                        if isinstance(raw_next, str):
+                            next_url = raw_next
+
+                        elif page_payload.get("has_more") and ids:
+                            from urllib.parse import urlencode
+                            sep = "&" if "?" in target else "?"
+                            next_url = f"{target}{sep}{urlencode({'after': ids[-1], 'limit': 1000})}"
+                    if not next_url:
+                        break
+                    if next_url.startswith("/"):
+                        from urllib.parse import urlparse
+                        u = urlparse(page_target)
+                        next_url = f"{u.scheme}://{u.netloc}{next_url}"
+                    if next_url == page_target:
+                        break
+                    page_target = next_url
+                    r_next = await client.get(page_target, headers=headers)
+                    if r_next.status_code != 200:
+                        break
+                    try:
+                        page_payload = r_next.json()
+                    except Exception:
+                        break
+                    before = len(ids)
+                    _append_ids(page_payload)
+                    if len(ids) == before:
+                        break
+
                 model_ok = (not p.model) or (p.model in ids) if ids else False
                 hint_parts = []
                 if redirect_trail:
                     hint_parts.append("（经过重定向：" + " → ".join(redirect_trail) + "）")
+                if ids:
+                    hint_parts.append(f"已从模型列表接口读取 {len(ids)} 个模型；不会再截断为前 50 个。")
                 if p.model and not model_ok:
-                    hint_parts.append(f"Model `{p.model}` 不在可用列表中。请用 `ollama list` 查看真实名称。")
+                    hint_parts.append(f"Model `{p.model}` 不在可用列表中。请确认服务商返回的真实模型名。")
                 return {
                     "ok": True,
                     "endpoint": target,
-                    "models": ids[:50],
+                    "models": ids,
                     "model_exists": model_ok,
                     "hint": "\n".join(hint_parts),
                 }
+
 
             # 仍然是重定向状态码 → 说明循环了或最终进了登录页
             if r.status_code in (301, 302, 303, 307, 308):
@@ -231,7 +279,8 @@ async def test_ai(p: TestAiPayload):
                 return {
                     "ok": True,
                     "endpoint": f"{ollama_base}/api/tags",
-                    "models": names[:50],
+                    "models": names,
+
                     "model_exists": model_ok,
                     "hint": (
                         "OpenAI /v1/models 接口失败，但 Ollama 原生 API 通了。"

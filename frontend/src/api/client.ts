@@ -270,7 +270,18 @@ export interface AppSettings {
     rpm_limit?: number;
     /** 强制 JSON Mode（response_format=json_object），Kimi/GLM/Qwen-VL 都支持；不支持时自动降级 */
     json_mode?: boolean;
+    /** OCR 后自动用多源行情库补全基金/股票/ETF 代码和交易所 */
+    auto_fill_code?: boolean;
+    /** 单图墙钟硬超时（秒） */
+    wall_timeout?: number;
+    /** 单图输出字符硬上限 */
+    content_hardcap?: number;
+    /** 是否请求流式输出 */
+    stream?: boolean;
+    /** 双开关：只有 stream 和 force_stream 都开才真正走流式 */
+    force_stream?: boolean;
   };
+
   schedule: { enabled: boolean; cron: string; preset: string };
   ui: { currency: string; theme: string };
 }
@@ -341,8 +352,12 @@ export interface EnrichSuggestion {
   matched_name?: string;
   score: number;
   source: "eastmoney" | "llm-fallback" | string;
-  alternates?: { code: string; name: string; score: number }[];
+  asset_type?: AssetType;
+  market?: Market;
+  exchange?: string;
+  alternates?: { code: string; name: string; score: number; asset_type?: AssetType; market?: Market; exchange?: string }[];
 }
+
 
 export interface EnrichResult {
   ok: boolean;
@@ -644,7 +659,10 @@ export interface OcrItem {
   name: string | null;
   code: string | null;
   asset_type: AssetType;
+  market?: Market | null;
+  exchange?: string | null;
   shares: number | null;
+
   amount: number | null;
   avg_cost: number | null;
   current_price: number | null;
@@ -674,7 +692,9 @@ export interface OcrCommitItem {
   code?: string;
   asset_type?: AssetType;
   market?: Market;
+  exchange?: string | null;
   platform?: string;
+
   note?: string;
   yield_7d?: number | null;
   expected_apr?: number | null;

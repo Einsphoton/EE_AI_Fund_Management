@@ -654,7 +654,9 @@ class CommitItem(BaseModel):
     code: Optional[str] = None
     asset_type: Optional[str] = None
     market: Optional[str] = "OTC"
+    exchange: Optional[str] = None
     platform: Optional[str] = ""
+
     note: Optional[str] = ""
     # 新建/扩展字段
     yield_7d: Optional[float] = None
@@ -747,7 +749,11 @@ def commit_decisions(
                         m_enum = models.Market(it.market or "OTC")
                     except ValueError:
                         m_enum = models.Market.otc
+                    exchange = (it.exchange or "").strip().upper()
+                    if exchange and exchange not in note:
+                        note = (note + " | " if note else "") + f"交易所:{exchange}"
                     asset = models.Asset(
+
                         name=it.name, code=code, asset_type=a_enum, market=m_enum,
                         platform=it.platform or "", note=note,
                         yield_7d=it.yield_7d, expected_apr=it.expected_apr,

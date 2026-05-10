@@ -56,11 +56,43 @@ def _is_real_stock_code(code: str) -> bool:
         return False
     if re.fullmatch(r"\d{1,6}", s):
         return True
-    if re.fullmatch(r"[A-Z]{1,5}", s):
+    if re.fullmatch(r"[A-Z]{1,8}", s):
         return True
-    if re.fullmatch(r"[A-Z]{1,5}\.[A-Z]+", s):  # BRK.B 之类
+    if re.fullmatch(r"[A-Z]{1,8}\.[A-Z]+", s):  # BRK.B 之类
         return True
     return False
+
+
+def _market_exchange_from_source(asset_type: str, code: str, source_market: str = "", source_code: str = "") -> tuple[str, str]:
+    """把各数据源里的 sh/sz/hk/us/of 前缀统一成 App market + exchange。"""
+    low_market = (source_market or "").strip().lower()
+    raw_code = (source_code or code or "").strip().upper()
+    if low_market in ("jj", "of", "fund"):
+        return "OTC", "OTC"
+    if low_market in ("sh", "sse") or raw_code.startswith("SH"):
+        return "A", "SH"
+    if low_market in ("sz", "szse") or raw_code.startswith("SZ"):
+        return "A", "SZ"
+    if low_market in ("bj", "bse") or raw_code.startswith("BJ"):
+        return "A", "BJ"
+    if low_market in ("hk", "hkex") or raw_code.startswith("HK"):
+        return "HK", "HK"
+    if low_market in ("us", "gb") or raw_code.startswith("GB_"):
+        # 腾讯美股后缀常见：AAPL.OQ=NASDAQ，BRK.N=NYSE，部分 .A=AMEX
+        if ".OQ" in raw_code or ".O" in raw_code:
+            return "US", "NASDAQ"
+        if ".N" in raw_code:
+            return "US", "NYSE"
+        if ".A" in raw_code:
+            return "US", "AMEX"
+        return "US", "UNKNOWN"
+    try:
+        from ..agent.portfolio_ocr_harness import infer_market_exchange
+        return infer_market_exchange(asset_type, code)
+    except Exception:
+        if asset_type == "fund":
+            return "OTC", "OTC"
+        return "A", "UNKNOWN"
 
 
 # ============================================================
@@ -132,12 +164,15 @@ async def _eastmoney_search_fund(name: str) -> list[dict]:
             code = (it.get("CODE") or it.get("FCODE") or "").strip()
             full_name = (it.get("NAME") or it.get("SHORTNAME") or "").strip()
             if _is_real_fund_code(code) and full_name:
+                ftype = (it.get("FundBaseInfo") or {}).get("FTYPE", "") or it.get("CATEGORYDESC", "")
                 out.append({
                     "code": code,
                     "name": full_name,
-                    "type": (it.get("FundBaseInfo") or {}).get("FTYPE", "") or it.get("CATEGORYDESC", ""),
+                    "type": ftype,
                     "source": "eastmoney",
-                    "asset_type": "fund",
+                    "asset_type": "etf" if "ETF" in str(ftype).upper() or "LOF" in str(ftype).upper() else "fund",
+                    "market": "OTC",
+                    "exchange": "OTC",
                 })
         return out
     except Exception as e:
@@ -207,7 +242,9 @@ async def _tencent_smartbox(name: str) -> list[dict]:
             elif market in ("sh", "sz", "bj"):
                 # A 股：基金（LOF/ETF）代码也在这个前缀下，靠 type_flag 区分
                 code = code_raw
-                if type_flag.startswith("ETF") or type_flag.startswith("JJ") or type_flag.startswith("LOF"):
+                if type_flag.startswith("ETF") or type_flag.startswith("LOF"):
+                    asset_type = "etf"
+                elif type_flag.startswith("JJ"):
                     asset_type = "fund"
                 else:
                     asset_type = "stock"
@@ -222,12 +259,15 @@ async def _tencent_smartbox(name: str) -> list[dict]:
             else:
                 continue
 
+            market_val, exchange = _market_exchange_from_source(asset_type, code, market, code_raw)
             out.append({
                 "code": code,
                 "name": display_name,
                 "type": type_flag,
                 "source": "tencent",
                 "asset_type": asset_type,
+                "market": market_val,
+                "exchange": exchange,
             })
         return out
     except Exception as e:
@@ -296,32 +336,40 @@ async def _sina_suggest(name: str) -> list[dict]:
                 code = low[2:] if low.startswith("of") else low[1:]
                 if not _is_real_fund_code(code):
                     continue
-                asset_type = "fund"
+                asset_type = "etf" if type_id == "83" else "fund"
+                src_market = "of"
             elif low.startswith("hk"):
                 code = low[2:]
                 if code and code.isdigit():
                     code = code.lstrip("0").rjust(5, "0")
                 asset_type = "stock"
+                src_market = "hk"
             elif low.startswith("gb_"):
                 code = code_with_market[3:].upper()
                 asset_type = "stock"
+                src_market = "gb"
             elif low.startswith("sh") or low.startswith("sz") or low.startswith("bj"):
+                src_market = low[:2]
                 code = low[2:]
-                # 按 type_id 判定：82/83/201 是基金类
-                asset_type = "fund" if type_id in ("82", "83", "201", "14") else "stock"
+                # 按 type_id 判定：82/83/201 是基金类；83 视为 ETF
+                asset_type = "etf" if type_id == "83" else ("fund" if type_id in ("82", "201", "14") else "stock")
             elif type_id in ("31", "41") and re.match(r"^[a-zA-Z]+$", code_with_market):
                 # 纯字母代码 + 美股/港股 type_id
                 code = code_with_market.upper()
                 asset_type = "stock"
+                src_market = "us" if type_id == "31" else "hk"
             else:
                 continue
 
+            market_val, exchange = _market_exchange_from_source(asset_type, code, src_market, code_with_market)
             out.append({
                 "code": code,
                 "name": display_name,
                 "type": type_id,
                 "source": "sina",
                 "asset_type": asset_type,
+                "market": market_val,
+                "exchange": exchange,
             })
         return out
     except Exception as e:
@@ -417,24 +465,30 @@ async def _xueqiu_search(name: str) -> list[dict]:
             is_fund_type = t in (14, 82, 83, 201)
 
             if low.startswith("sh") or low.startswith("sz") or low.startswith("bj"):
+                src_market = low[:2]
                 code = raw_code[2:]
-                asset_type = "fund" if is_fund_type else "stock"
+                asset_type = "etf" if t == 83 else ("fund" if is_fund_type else "stock")
             elif raw_code.isdigit():
                 # 港股纯数字
+                src_market = "hk"
                 code = raw_code.lstrip("0").rjust(5, "0")
                 asset_type = "stock"
             elif re.match(r"^[A-Z][A-Z0-9\.\-]*$", raw_code):
                 # 美股 ticker
+                src_market = "us"
                 code = raw_code.upper()
                 asset_type = "stock"
             else:
                 continue
+            market_val, exchange = _market_exchange_from_source(asset_type, code, src_market, raw_code)
             out.append({
                 "code": code,
                 "name": display_name,
                 "type": str(t) if t is not None else "",
                 "source": "xueqiu",
                 "asset_type": asset_type,
+                "market": market_val,
+                "exchange": exchange,
             })
         return out
     except Exception as e:
@@ -502,7 +556,8 @@ async def _enrich_fund_code(name: str) -> dict | None:
 
     并行策略：
     - 同时打 4 个源（eastmoney + tencent + sina + xueqiu），任何一个先回都先用
-    - 总硬超时 3s（OCR 主路径有 5s 整批硬上限，这里给得更紧）
+    - 总硬超时 6s（名称查码不是模型 OCR，适当放宽可减少随机漏码）
+
     - 跨源结果做加权融合：把每条候选打分 = 名字相似度 × 来源权重
     - 最终从所有候选里选总分最高的；alternates 里也是跨源去重后的
     """
@@ -528,8 +583,8 @@ async def _enrich_fund_code(name: str) -> dict | None:
             if isinstance(items, Exception):
                 continue
             for it in (items or []):
-                # 只保留 fund 类型（基金代码是 6 位）
-                if it.get("asset_type") == "fund" and _is_real_fund_code(it.get("code", "")):
+                # 保留 fund / etf 类型（基金/ETF 代码通常是 6 位）
+                if it.get("asset_type") in ("fund", "etf") and _is_real_fund_code(it.get("code", "")):
                     results.append(it)
     except asyncio.TimeoutError:
         # 整批 3s 超时，用已经回来的结果（如果有的话）—— 走不到这里因为 return_exceptions=True
@@ -561,12 +616,18 @@ async def _enrich_fund_code(name: str) -> dict | None:
         "matched_name": best["name"],
         "score": round(best_score, 3),
         "source": best.get("source", "unknown"),
+        "asset_type": best.get("asset_type", "fund"),
+        "market": best.get("market", "OTC"),
+        "exchange": best.get("exchange", "OTC"),
         "alternates": [
             {
                 "code": c["code"],
                 "name": c["name"],
                 "score": round(s, 3),
                 "source": c.get("source", "unknown"),
+                "asset_type": c.get("asset_type", "fund"),
+                "market": c.get("market", "OTC"),
+                "exchange": c.get("exchange", "OTC"),
             }
             for s, c in scored[:5] if s >= 0.45
         ],
@@ -592,8 +653,9 @@ async def _enrich_stock_code(name: str) -> dict | None:
     try:
         gathered = await asyncio.wait_for(
             asyncio.gather(*[s[1] for s in sources], return_exceptions=True),
-            timeout=3.0,
+            timeout=6.0,
         )
+
         for src_name, items in zip([s[0] for s in sources], gathered):
             if isinstance(items, Exception):
                 continue
@@ -627,12 +689,18 @@ async def _enrich_stock_code(name: str) -> dict | None:
         "matched_name": best["name"],
         "score": round(best_score, 3),
         "source": best.get("source", "unknown"),
+        "asset_type": best.get("asset_type", "stock"),
+        "market": best.get("market", "A"),
+        "exchange": best.get("exchange", "UNKNOWN"),
         "alternates": [
             {
                 "code": c["code"],
                 "name": c["name"],
                 "score": round(s, 3),
                 "source": c.get("source", "unknown"),
+                "asset_type": c.get("asset_type", "stock"),
+                "market": c.get("market", "A"),
+                "exchange": c.get("exchange", "UNKNOWN"),
             }
             for s, c in scored[:5] if s >= 0.45
         ],

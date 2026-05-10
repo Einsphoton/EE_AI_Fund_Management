@@ -32,7 +32,11 @@ FAIL = "[FAIL]"
 ITEM_ERR = "  -"
 
 VALID_ASSET_TYPES = {"fund", "stock", "etf", "money_fund", "wealth", "cash", "bond"}
+VALID_MARKETS = {"A", "HK", "US", "OTC", "CNY", "USD", "HKD"}
+VALID_EXCHANGES = {"SH", "SZ", "BJ", "HK", "NYSE", "NASDAQ", "AMEX", "OTC", "CNY", "USD", "HKD", "UNKNOWN"}
+VALID_SCHEMAS = {"ee-fund-mgr/portfolio-ocr@1", "ee-fund-mgr/portfolio-ocr@2"}
 DATE_PATTERN = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 
 def _err(path: str, msg: str) -> str:
@@ -100,8 +104,9 @@ def validate(data: Any) -> tuple[bool, list[str], int]:
         return False, [_err("$", f"根必须是 JSON 对象，实际 {type(data).__name__}")], 0
 
     schema = data.get("schema")
-    if schema is not None and schema != "ee-fund-mgr/portfolio-ocr@1":
-        errs.append(_err("$.schema", f"未知 schema 版本：{schema!r}（期望 ee-fund-mgr/portfolio-ocr@1，或省略）"))
+    if schema is not None and schema not in VALID_SCHEMAS:
+        errs.append(_err("$.schema", f"未知 schema 版本：{schema!r}（期望 {sorted(VALID_SCHEMAS)}，或省略）"))
+
 
     sd = data.get("screenshot_date")
     if sd is not None:

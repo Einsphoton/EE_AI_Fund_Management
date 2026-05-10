@@ -162,8 +162,9 @@ async def _auto_fill_fund_codes(items: list[dict], on_log) -> None:
         return
 
     sem = asyncio.Semaphore(8)
-    PER_REQ_TIMEOUT = 3.0      # 单条最多等 3s
-    BATCH_TIMEOUT = 5.0        # 整批最多 5s（避免某条卡死把整批拖 8s+）
+    PER_REQ_TIMEOUT = 7.0      # 单条最多等 7s：名称查码多源搜索，放宽可减少随机漏码
+    BATCH_TIMEOUT = 12.0       # 整批最多 12s；仍然严格受控，不会拖垮 OCR 主流程
+
 
     async def _one(it: dict):
         name = (it.get("name") or "").strip()
@@ -186,13 +187,22 @@ async def _auto_fill_fund_codes(items: list[dict], on_log) -> None:
                 return
         if sug and sug.get("code"):
             it["code"] = sug["code"]
+            if sug.get("asset_type") in ("fund", "etf", "stock"):
+                it["asset_type"] = sug["asset_type"]
+            if sug.get("market"):
+                it["market"] = sug["market"]
+            if sug.get("exchange"):
+                it["exchange"] = sug["exchange"]
             it.setdefault("_code_source", sug.get("source") or "")
             it.setdefault("_code_score", sug.get("score") or 0.0)
             it.setdefault("_code_matched_name", sug.get("matched_name") or "")
             try:
+                market_bits = ""
+                if sug.get("market") or sug.get("exchange"):
+                    market_bits = f" · {sug.get('market') or '?'} / {sug.get('exchange') or '?'}"
                 await on_log(
                     f"  ↪ 自动查码 [{name}] → {sug['code']}"
-                    f"（{sug.get('source','?')} · {(sug.get('score') or 0) * 100:.0f}% · "
+                    f"（{sug.get('source','?')} · {(sug.get('score') or 0) * 100:.0f}%{market_bits} · "
                     f"匹配「{sug.get('matched_name') or name}」）"
                 )
             except Exception:

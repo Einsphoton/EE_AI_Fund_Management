@@ -71,8 +71,10 @@ export default function LLMConfigCard({
   mode = "ai", showCfAccess = false, testHint,
 }: LLMConfigCardProps) {
   const [showCfAdvanced, setShowCfAdvanced] = useState(!!value.cf_access_client_id);
+  const [modelFilter, setModelFilter] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<null | {
+
     ok: boolean;
     endpoint?: string;
     models?: string[];
@@ -89,7 +91,9 @@ export default function LLMConfigCard({
       return;
     }
     setTesting(true);
+    setModelFilter("");
     setTestResult(null);
+
     try {
       const r = await SettingsApi.testAi(value.base_url, value.api_key, value.model, {
         cf_access_client_id: value.cf_access_client_id,
@@ -108,8 +112,14 @@ export default function LLMConfigCard({
     mode === "ai" ? "batch_concurrency" : "concurrency";
   const concurrencyDefault = mode === "ai" ? 2 : 2;
   const concurrencyMax = mode === "ai" ? 16 : 5;
+  const availableModels = testResult?.models ?? [];
+  const modelFilterQuery = modelFilter.trim().toLowerCase();
+  const filteredModels = modelFilterQuery
+    ? availableModels.filter((m) => m.toLowerCase().includes(modelFilterQuery))
+    : availableModels;
 
   return (
+
     <div className="card p-5">
       <h3 className="font-semibold mb-1 flex items-center gap-2">
         {icon || <Zap className="w-4 h-4 text-accent" />}
@@ -450,27 +460,54 @@ export default function LLMConfigCard({
           {testResult.hint && (
             <pre className="text-muted whitespace-pre-wrap break-words mb-2">{testResult.hint}</pre>
           )}
-          {testResult.models && testResult.models.length > 0 && (
+          {availableModels.length > 0 && (
             <div>
-              <div className="text-muted mb-1">可用模型 ({testResult.models.length})：</div>
-              <div className="flex flex-wrap gap-1">
-                {testResult.models.map((m) => (
+              <div className="flex items-center gap-2 mb-2">
+                <div className="text-muted shrink-0">
+                  可用模型 ({filteredModels.length}/{availableModels.length})：
+                </div>
+                <input
+                  className="input h-8 flex-1 text-xs"
+                  type="search"
+                  placeholder="搜索模型名，如 kimi / qwen / vision / 35b"
+                  value={modelFilter}
+                  onChange={(e) => setModelFilter(e.target.value)}
+                />
+                {modelFilter && (
                   <button
-                    key={m}
-                    className={`px-2 py-0.5 rounded-md font-mono text-[10px] border transition ${
-                      m === value.model
-                        ? "border-accent/60 bg-accent/15 text-white"
-                        : "border-line bg-bg-soft text-muted hover:border-accent/40 hover:text-accent-soft"
-                    }`}
-                    onClick={() => set({ model: m })}
-                    title="点击使用此模型名"
+                    type="button"
+                    className="btn !px-2 !py-1 text-[10px]"
+                    onClick={() => setModelFilter("")}
                   >
-                    {m}
+                    清空
                   </button>
-                ))}
+                )}
               </div>
+              {filteredModels.length > 0 ? (
+                <div className="flex flex-wrap gap-1 max-h-56 overflow-y-auto pr-1">
+                  {filteredModels.map((m) => (
+                    <button
+                      key={m}
+                      className={`px-2 py-0.5 rounded-md font-mono text-[10px] border transition ${
+                        m === value.model
+                          ? "border-accent/60 bg-accent/15 text-white"
+                          : "border-line bg-bg-soft text-muted hover:border-accent/40 hover:text-accent-soft"
+                      }`}
+                      onClick={() => set({ model: m })}
+                      title="点击使用此模型名"
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-line/60 bg-bg-soft/40 p-3 text-muted">
+                  没有匹配 “{modelFilter}” 的模型。
+                </div>
+              )}
             </div>
           )}
+
         </div>
       )}
     </div>

@@ -41,15 +41,94 @@ const PLATFORM_HINTS = [
   "工商银行", "富途", "招商证券", "中银国际", "雪盈证券",
 ];
 
+const OCR_MEMORY_KEY = "ee_ocr_import_memory_v1";
+
+interface OcrMemoryEntry {
+  platform?: string;
+  market?: Market;
+  exchange?: string;
+}
+
+interface OcrMemory {
+  defaultPlatform?: string;
+  defaultMarket?: Market;
+  byName?: Record<string, OcrMemoryEntry>;
+}
+
+function loadOcrMemory(): OcrMemory {
+  try {
+    if (typeof window === "undefined") return {};
+    return JSON.parse(localStorage.getItem(OCR_MEMORY_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveOcrMemory(mem: OcrMemory) {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(OCR_MEMORY_KEY, JSON.stringify(mem));
+    }
+  } catch {
+    // ignore localStorage quota / privacy mode errors
+  }
+}
+
+function normMemKey(name: string | null | undefined): string {
+  return (name || "").replace(/[\s（）()【】\[\]·・-]/g, "").toLowerCase();
+}
+
+function applyOcrMemory(
+  it: OcrItem,
+  fallbackPlatform: string,
+  fallbackMarket: Market,
+): OcrMemoryEntry {
+  const mem = loadOcrMemory();
+  const hit = mem.byName?.[normMemKey(it.name || "")];
+  return {
+    platform: hit?.platform || fallbackPlatform || mem.defaultPlatform || "",
+    market: hit?.market || fallbackMarket || mem.defaultMarket,
+    exchange: hit?.exchange || it.exchange || undefined,
+  };
+}
+
+function learnOcrMemoryFromRows(rows: RowState[]) {
+  const mem = loadOcrMemory();
+  const byName = { ...(mem.byName || {}) };
+  let defaultPlatform = mem.defaultPlatform;
+  let defaultMarket = mem.defaultMarket;
+  for (const r of rows) {
+    const name = (r.decision.name || "").trim();
+    const key = normMemKey(name);
+    if (!key) continue;
+    const platform = (r.decision.platform || "").trim();
+    const market = r.decision.market;
+    const exchange = (r.decision.exchange || "").trim();
+    if (platform) defaultPlatform = platform;
+    if (market) defaultMarket = market;
+    byName[key] = {
+      ...(byName[key] || {}),
+      ...(platform ? { platform } : {}),
+      ...(market ? { market } : {}),
+      ...(exchange ? { exchange } : {}),
+    };
+  }
+  saveOcrMemory({ ...mem, defaultPlatform, defaultMarket, byName });
+}
+
+
 export default function ImportOcr() {
   const ocr = useOcrTask();
 
   // 上传文件本地态（这部分不需要跨路由保活；提交完会清空）
   const [files, setFiles] = useState<UploadFile[]>([]);
-  const [platformHint, setPlatformHint] = useState("");
+  const [platformHint, setPlatformHint] = useState(() => loadOcrMemory().defaultPlatform || "");
+
 
   // 行编辑态：从 ocr.results 派生 → 用 useState 缓存以便用户编辑
   const [rows, setRows] = useState<RowState[]>([]);
+  const [bulkLookingUp, setBulkLookingUp] = useState(false);
+
 
   // 当 ocr.results 更新时（解析完成 / 重新挂回任务）→ 重建行
   useEffect(() => {
@@ -62,6 +141,8 @@ export default function ImportOcr() {
       res.items.forEach((it, itemIdx) => {
         const sug = it._suggestion;
         const top = (it._candidates && it._candidates[0]) || null;
+        const fallbackMarket = it.market || defaultMarketFor(it.asset_type);
+        const learned = applyOcrMemory(it, res.platform || platformHint || "", fallbackMarket);
         newRows.push({
           fileIdx, itemIdx, origin: it,
           bindAssetId: top?.asset_id ?? null,
@@ -71,9 +152,11 @@ export default function ImportOcr() {
             name: it.name || "",
             code: it.code || "",
             asset_type: it.asset_type,
-            market: defaultMarketFor(it.asset_type),
-            platform: res.platform || platformHint || "",
+            market: learned.market || fallbackMarket,
+            exchange: learned.exchange || undefined,
+            platform: learned.platform || "",
             shares: it.shares ?? undefined,
+
             delta_shares: sug?.delta_shares,
             delta_amount: sug?.delta_amount,
             avg_cost: it.avg_cost ?? undefined,
@@ -85,7 +168,8 @@ export default function ImportOcr() {
             yield_7d: it.yield_7d ?? undefined,
             expected_apr: it.expected_apr ?? undefined,
             maturity_date: it.maturity_date ?? undefined,
-            raw: { raw_text: it.raw_text || "" },
+            raw: { raw_text: it.raw_text || "", exchange: learned.exchange || it.exchange || null },
+
           },
         });
       });
@@ -143,9 +227,16 @@ export default function ImportOcr() {
 
   // ----- 行编辑 -----
   const updateRow = (idx: number, patch: Partial<RowState["decision"]>) => {
-    setRows((prev) => prev.map((r, i) =>
-      i === idx ? { ...r, decision: { ...r.decision, ...patch } } : r));
+    setRows((prev) => {
+      const next = prev.map((r, i) =>
+        i === idx ? { ...r, decision: { ...r.decision, ...patch } } : r);
+      if (patch.platform !== undefined || patch.market !== undefined || patch.exchange !== undefined) {
+        learnOcrMemoryFromRows([next[idx]]);
+      }
+      return next;
+    });
   };
+
 
   const updateBind = (idx: number, candId: number | null) => {
     setRows((prev) => prev.map((r, i) => {
@@ -165,11 +256,48 @@ export default function ImportOcr() {
     return s;
   }, [rows]);
 
+  const fillMissingCodes = async () => {
+    if (bulkLookingUp) return;
+    const targets = rows
+      .map((r, idx) => ({ r, idx }))
+      .filter(({ r }) => !r.decision.code && !!r.decision.name && ["fund", "etf", "stock"].includes(r.decision.asset_type || "fund"));
+    if (targets.length === 0) {
+      toast("没有需要补全代码的行");
+      return;
+    }
+    setBulkLookingUp(true);
+    let filled = 0;
+    try {
+      for (const { r, idx } of targets) {
+        const assetType = r.decision.asset_type || "fund";
+        const res = await Assets.lookupCode(r.decision.name || "", assetType, false);
+        const s = res.suggestion;
+        if (res.ok && s?.code) {
+          updateRow(idx, {
+            code: s.code,
+            asset_type: s.asset_type || assetType,
+            market: s.market || r.decision.market,
+            exchange: s.exchange || r.decision.exchange,
+          });
+          filled += 1;
+        }
+      }
+      toast.success(`已补全 ${filled}/${targets.length} 个缺失代码`);
+    } catch (e: any) {
+      toast.error(`补全代码失败：${e?.message || e}`);
+    } finally {
+      setBulkLookingUp(false);
+    }
+  };
+
   const submit = async () => {
+
     if (rows.length === 0) return;
     try {
+      learnOcrMemoryFromRows(rows);
       await ocr.commit(rows.map((r) => r.decision));
       clearFiles(); // 提交成功 → 顺手把上传的图片缩略图也清掉
+
     } catch {
       // toast 已在 hook 里出
     }
@@ -203,7 +331,11 @@ export default function ImportOcr() {
           <div>
             <label className="label">平台提示（可不选）</label>
             <select className="input" value={platformHint}
-                    onChange={(e) => setPlatformHint(e.target.value)}>
+                    onChange={(e) => {
+                      setPlatformHint(e.target.value);
+                      if (e.target.value) saveOcrMemory({ ...loadOcrMemory(), defaultPlatform: e.target.value });
+                    }}>
+
               {PLATFORM_HINTS.map((p) => (
                 <option key={p} value={p}>{p || "（不指定，让 AI 自己判断）"}</option>
               ))}
@@ -320,40 +452,84 @@ export default function ImportOcr() {
               <option key={p} value={p} />
             ))}
           </datalist>
-          <div className="flex items-center justify-between px-5 py-3 border-b border-line/60 bg-bg-soft/30">
-            <h2 className="font-semibold">确认清单（共 {rows.length} 项）</h2>
-            <button
-              className="btn-primary"
-              disabled={ocr.committing || rows.length === 0}
-              onClick={submit}
-            >
-              {ocr.committing ? <><Loader2 className="w-4 h-4 animate-spin" /> 提交中…</> : <><CheckCircle2 className="w-4 h-4" /> 确认导入</>}
-            </button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-bg-soft/30 text-xs text-muted">
-                <tr>
-                  <th className="text-left px-3 py-2 font-normal">资产</th>
-                  <th className="text-left px-3 py-2 font-normal">类型</th>
-                  <th className="text-left px-3 py-2 font-normal">绑定</th>
-                  <th className="text-right px-3 py-2 font-normal">OCR 数据</th>
-                  <th className="text-left px-3 py-2 font-normal">动作</th>
-                  <th className="text-left px-3 py-2 font-normal">建议</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, idx) => (
-                  <RowEditor
-                    key={`${r.fileIdx}-${r.itemIdx}`}
-                    row={r}
-                    onUpdate={(patch) => updateRow(idx, patch)}
-                    onBind={(id) => updateBind(idx, id)}
-                  />
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-b border-line/60 bg-bg-soft/30">
+            <div>
+              <h2 className="font-semibold">确认清单（共 {rows.length} 项）</h2>
+              <p className="text-[11px] text-muted mt-1">
+                只保留导入所需字段；每一列都可人工二次确认编辑。
+                {Object.entries(stats).filter(([, v]) => v > 0).map(([k, v]) => (
+                  <span key={k} className="ml-2">· {actionLabel(k)} <span className="text-white">{v}</span></span>
                 ))}
-              </tbody>
-            </table>
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                className="btn"
+                disabled={ocr.committing || bulkLookingUp || rows.every((r) => r.decision.code || !["fund", "etf", "stock"].includes(r.decision.asset_type || "fund"))}
+
+                onClick={fillMissingCodes}
+                title="对所有缺失代码的基金/ETF/股票，调用天天基金、腾讯证券、新浪、雪球多源搜索补全"
+              >
+                <Loader2 className={`w-4 h-4 ${bulkLookingUp ? "animate-spin" : "hidden"}`} />
+                补全缺失代码
+              </button>
+              <button
+                className="btn-primary"
+                disabled={ocr.committing || rows.length === 0}
+                onClick={submit}
+              >
+                {ocr.committing ? <><Loader2 className="w-4 h-4 animate-spin" /> 提交中…</> : <><CheckCircle2 className="w-4 h-4" /> 确认导入</>}
+              </button>
+            </div>
           </div>
+
+          <div className="p-3 bg-bg-soft/10 space-y-3">
+            <div className="rounded-lg border border-accent/20 bg-accent/5 p-3 text-xs text-muted leading-relaxed">
+              <span className="text-white/90 font-medium">提示：</span>
+              代码如果模型漏识别，可点击「补全缺失代码」按基金/股票名称多源搜索；清单包含新建、追加、跳过等所有动作，不只是新建资产。
+            </div>
+            {ocr.results.some((r) => (r.items || []).length === 0 && !r.error) && (
+              <div className="rounded-lg border border-amber2/30 bg-amber2/5 p-3 text-xs text-amber2 leading-relaxed">
+                以下截图接口调用成功，但模型返回 items=[]（通常是把单品详情页误判为非持仓页，或截图里产品/持仓信息不够清晰）：
+
+                {ocr.results.filter((r) => (r.items || []).length === 0 && !r.error).map((r) => (
+                  <span key={r.file} className="ml-2 font-mono">{r.file}</span>
+                ))}
+              </div>
+            )}
+            <div className="overflow-x-auto">
+
+              <table className="w-full min-w-[1280px] text-sm border-separate border-spacing-0">
+                <thead className="bg-bg-soft/30 text-xs text-muted">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-normal w-[220px]" title="资产/基金/股票名称，可人工修正">资产名称</th>
+                    <th className="text-left px-3 py-2 font-normal w-[170px]" title="基金代码、股票代码或 ETF 代码；缺失时可自动补全">代码</th>
+                    <th className="text-left px-3 py-2 font-normal w-[170px]" title="实际购买或持有平台，如微信理财通、支付宝、招商银行、富途">购买平台</th>
+                    <th className="text-left px-3 py-2 font-normal w-[130px]" title="资产类型，决定入库方式">类型</th>
+                    <th className="text-left px-3 py-2 font-normal w-[120px]" title="交易市场：A股、港股、美股；场外基金为 OTC">市场</th>
+                    <th className="text-left px-3 py-2 font-normal w-[200px]" title="绑定已有资产；不绑定则新建">绑定现有资产</th>
+                    <th className="text-left px-3 py-2 font-normal w-[130px]" title="当前持有份额/股数，可人工修正">份额</th>
+                    <th className="text-left px-3 py-2 font-normal w-[130px]" title="单位成本/单价，可人工修正">单价</th>
+                    <th className="text-left px-3 py-2 font-normal w-[150px]" title="确认后执行的导入动作">动作</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {rows.map((r, idx) => (
+                    <RowEditor
+                      key={`${r.fileIdx}-${r.itemIdx}`}
+                      row={r}
+                      onUpdate={(patch) => updateRow(idx, patch)}
+                      onBind={(id) => updateBind(idx, id)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+
         </div>
       )}
 
@@ -507,13 +683,16 @@ function RowEditor({ row, onUpdate, onBind }: {
   const it = row.origin;
   const cands = it._candidates || [];
   const sug = it._suggestion;
-  const meta = metaOf(row.decision.asset_type);
+  const assetType: AssetType = row.decision.asset_type || "fund";
+  const meta = metaOf(assetType);
   const [lookingUp, setLookingUp] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+
+
 
   // 是否需要"查代码"提示：行情类（fund/etf/stock）且 code 为空
   const codeMissing = !row.decision.code &&
-    ["fund", "etf", "stock"].includes(row.decision.asset_type);
+    ["fund", "etf", "stock"].includes(assetType);
+
 
   const lookupCode = async () => {
     const name = (row.decision.name || "").trim();
@@ -523,11 +702,18 @@ function RowEditor({ row, onUpdate, onBind }: {
     }
     setLookingUp(true);
     try {
-      const r = await Assets.lookupCode(name, row.decision.asset_type);
+      const r = await Assets.lookupCode(name, assetType);
+
       if (r.ok && r.suggestion?.code) {
         const s = r.suggestion;
-        onUpdate({ code: s.code });
+        onUpdate({
+          code: s.code,
+          asset_type: s.asset_type || row.decision.asset_type,
+          market: s.market || row.decision.market,
+          exchange: s.exchange || row.decision.exchange,
+        });
         // 如果模型查回来的官方全名跟用户编辑的名字不太一样且置信度高，提示用户考虑替换
+
         if (s.matched_name && s.matched_name !== name && s.score >= 0.9) {
           toast.success(
             `代码：${s.code}（来自 ${s.source === "eastmoney" ? "天天基金" : "AI"}，匹配 "${s.matched_name}"）`,
@@ -551,70 +737,78 @@ function RowEditor({ row, onUpdate, onBind }: {
   return (
     <>
     <tr className="border-t border-line/40 hover:bg-bg-soft/20">
-      {/* 资产名 + 代码 + 展开按钮 */}
       <td className="px-3 py-2 align-top">
-        <div className="flex items-start gap-1">
-          <button
-            type="button"
-            className="mt-1 text-muted hover:text-white shrink-0"
-            onClick={() => setExpanded((x) => !x)}
-            title={expanded ? "收起详情" : "展开：编辑平台 / 备注 / 起始日 / 到期日 等"}
-          >
-            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-          </button>
-          <div className="flex-1 min-w-0">
-            <input
-              className="input text-xs h-8 w-44"
-              value={row.decision.name || ""}
-              onChange={(e) => onUpdate({ name: e.target.value })}
-              placeholder="名称"
-            />
-            <div className="flex items-center gap-1 mt-1">
-              <input
-                className={`input text-xs h-7 w-32 ${codeMissing ? "border-amber2/60" : ""}`}
-                value={row.decision.code || ""}
-                onChange={(e) => onUpdate({ code: e.target.value })}
-                placeholder={codeMissing ? "未识别" : "代码"}
-              />
-              {(["fund", "etf", "stock"].includes(row.decision.asset_type)) && (
-                <button
-                  type="button"
-                  className="btn !h-7 !px-1.5 !text-[10px]"
-                  onClick={lookupCode}
-                  disabled={lookingUp || !row.decision.name}
-                  title="多源并行查代码：天天基金 + 腾讯证券 + 新浪 + 雪球（支持 A股/港股/美股/基金/ETF）"
-                >
-                  {lookingUp ? <Loader2 className="w-3 h-3 animate-spin" /> : <>🔍 查码</>}
-                </button>
-              )}
-            </div>
-            {/* 平台直接显示在这里：高频字段不藏在展开里 */}
-            <input
-              className="input text-xs h-7 w-44 mt-1"
-              value={row.decision.platform || ""}
-              onChange={(e) => onUpdate({ platform: e.target.value })}
-              placeholder="平台（如：微信理财通）"
-              list="ocr-platform-suggestions"
-            />
-          </div>
+        <input
+          className="input text-xs h-8 w-full min-w-[200px]"
+          value={row.decision.name || ""}
+          onChange={(e) => onUpdate({ name: e.target.value })}
+          placeholder="资产名称"
+          title="资产/基金/股票名称，可人工修正"
+        />
+      </td>
+      <td className="px-3 py-2 align-top">
+        <div className="flex items-center gap-1 min-w-[150px]">
+          <input
+            className={`input text-xs h-8 flex-1 ${codeMissing ? "border-amber2/60" : ""}`}
+            value={row.decision.code || ""}
+            onChange={(e) => onUpdate({ code: e.target.value })}
+            placeholder={codeMissing ? "未识别" : "代码"}
+            title="基金/股票/ETF 代码；可手动填写或点击查码"
+          />
+          {["fund", "etf", "stock"].includes(assetType) && (
+            <button
+              type="button"
+              className="btn !h-8 !px-2 !text-[10px]"
+              onClick={lookupCode}
+              disabled={lookingUp || !row.decision.name}
+              title="按名称多源搜索代码：天天基金 + 腾讯证券 + 新浪 + 雪球"
+            >
+              {lookingUp ? <Loader2 className="w-3 h-3 animate-spin" /> : "查"}
+            </button>
+          )}
         </div>
       </td>
+      <td className="px-3 py-2 align-top">
+        <input
+          className="input text-xs h-8 w-full min-w-[150px]"
+          value={row.decision.platform || ""}
+          onChange={(e) => onUpdate({ platform: e.target.value })}
+          placeholder="购买平台"
+          title="实际购买或持有平台，如微信理财通、支付宝、招商银行、富途"
+          list="ocr-platform-suggestions"
+        />
+      </td>
 
-      {/* 类型 */}
+
       <td className="px-3 py-2 align-top">
         <select
-          className="input text-xs h-8 w-28"
-          value={row.decision.asset_type}
+          className="input text-xs h-8 w-full min-w-[110px]"
+          value={assetType}
           onChange={(e) => onUpdate({
             asset_type: e.target.value as AssetType,
             market: defaultMarketFor(e.target.value as AssetType),
           })}
+          title="资产类型，决定导入和持仓计算方式"
         >
           {(Object.keys(ASSET_TYPE_META) as AssetType[]).map((t) => (
             <option key={t} value={t}>{ASSET_TYPE_META[t].label}</option>
           ))}
         </select>
       </td>
+      <td className="px-3 py-2 align-top">
+        <select
+          className="input text-xs h-8 w-full min-w-[100px]"
+          value={row.decision.market || defaultMarketFor(assetType)}
+          onChange={(e) => onUpdate({ market: e.target.value as Market })}
+          title="市场：A股、港股、美股；场外基金为 OTC"
+        >
+          {ASSET_TYPE_META[assetType].availableMarkets.map((m: Market) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+      </td>
+
+
 
       {/* 绑定的现有资产 */}
       <td className="px-3 py-2 align-top">
@@ -632,35 +826,33 @@ function RowEditor({ row, onUpdate, onBind }: {
         </select>
       </td>
 
-      {/* OCR 数据预览 */}
-      <td className="px-3 py-2 align-top text-xs text-right font-mono whitespace-nowrap">
-        {meta.hasShares ? (
-          <>
-            <div>份额 <span className="text-white">{fmtNum(it.shares)}</span></div>
-            <div>成本 <span className="text-white">{fmtNum(it.avg_cost)}</span></div>
-            <div>市值 <span className="text-white">{it.market_value != null ? fmtMoney(it.market_value) : "-"}</span></div>
-          </>
-        ) : (
-          <>
-            <div>金额 <span className="text-white">{it.amount != null ? fmtMoney(it.amount) : "-"}</span></div>
-            {meta.needsYield7d && <div>7日年化 <span className="text-white">{fmtNum(it.yield_7d)}%</span></div>}
-            {meta.needsExpectedApr && <div>预期年化 <span className="text-white">{fmtNum(it.expected_apr)}%</span></div>}
-          </>
-        )}
-        {it.profit != null && (
-          <div className={it.profit >= 0 ? "text-emerald2" : "text-rose2"}>
-            收益 {it.profit >= 0 ? "+" : ""}{fmtMoney(it.profit)}
-            {it.profit_pct != null && <span className="ml-1">({fmtNum(it.profit_pct)}%)</span>}
-          </div>
-        )}
+      <td className="px-3 py-2 align-top">
+        <NumberCell
+          title="当前持有份额/股数；可人工修正"
+          value={meta.hasShares ? row.decision.shares : row.decision.principal_amount}
+          step={meta.hasShares ? "0.0001" : "0.01"}
+          placeholder={meta.hasShares ? "份额" : "金额"}
+          onChange={(v) => meta.hasShares ? onUpdate({ shares: v }) : onUpdate({ principal_amount: v })}
+        />
+      </td>
+      <td className="px-3 py-2 align-top">
+        <NumberCell
+          title="单位成本/单价；可人工修正"
+          value={row.decision.avg_cost}
+          step="0.0001"
+          placeholder="单价"
+          onChange={(v) => onUpdate({ avg_cost: v })}
+        />
       </td>
 
-      {/* 动作 */}
+
+
       <td className="px-3 py-2 align-top">
         <select
-          className="input text-xs h-8 w-28"
+          className="input text-xs h-8 w-full min-w-[130px]"
           value={row.decision.action}
           onChange={(e) => onUpdate({ action: e.target.value as RowState["decision"]["action"] })}
+          title={sug?.reason || "选择本行导入动作"}
         >
           {row.bindAssetId == null && <option value="create">新建</option>}
           {row.bindAssetId != null && meta.hasShares && <option value="append_buy">追加买入</option>}
@@ -668,174 +860,49 @@ function RowEditor({ row, onUpdate, onBind }: {
           {row.bindAssetId != null && !meta.hasShares && <option value="update_field">更新本金</option>}
           <option value="skip">跳过</option>
         </select>
-        {row.decision.action === "append_buy" || row.decision.action === "append_sell" ? (
-          <input
-            className="input text-xs h-7 w-28 mt-1 font-mono"
-            type="number" step="0.0001"
-            value={row.decision.delta_shares ?? ""}
-            onChange={(e) => onUpdate({ delta_shares: e.target.valueAsNumber || undefined })}
-            placeholder="差额份额"
-          />
-        ) : row.decision.action === "update_field" ? (
-          <input
-            className="input text-xs h-7 w-28 mt-1 font-mono"
-            type="number" step="0.01"
-            value={row.decision.principal_amount ?? ""}
-            onChange={(e) => onUpdate({ principal_amount: e.target.valueAsNumber || undefined })}
-            placeholder="新本金"
-          />
-        ) : null}
       </td>
 
-      {/* AI 建议提示 */}
-      <td className="px-3 py-2 align-top text-xs text-muted max-w-[220px]">
-        {sug?.reason || "—"}
-      </td>
     </tr>
-    {/* 展开行：更多字段编辑（平台/备注/起始日/到期日/购买日期/初始份额成本/特殊字段） */}
-    {expanded && (
-      <tr className="border-t border-line/40 bg-bg-soft/20">
-        <td colSpan={6} className="px-6 py-3">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-            <div>
-              <label className="block text-muted mb-1">购买日期 / 截图日期</label>
-              <input
-                className="input text-xs h-8 w-full"
-                type="date"
-                value={asDateInput(row.decision.snapshot_date)}
-                onChange={(e) => onUpdate({ snapshot_date: e.target.value || undefined })}
-              />
-              <div className="text-[10px] text-muted mt-0.5">追加交易/初始买入会用这个日期</div>
-            </div>
-
-            {/* 行情类才显示初始份额/成本（用于"新建"动作） */}
-            {row.decision.action === "create" && meta.hasShares && (
-              <>
-                <div>
-                  <label className="block text-muted mb-1">初始份额</label>
-                  <input
-                    className="input text-xs h-8 w-full font-mono"
-                    type="number" step="0.0001"
-                    value={row.decision.shares ?? ""}
-                    onChange={(e) => onUpdate({ shares: e.target.valueAsNumber || undefined })}
-                    placeholder="如 1234.5678"
-                  />
-                </div>
-                <div>
-                  <label className="block text-muted mb-1">平均成本</label>
-                  <input
-                    className="input text-xs h-8 w-full font-mono"
-                    type="number" step="0.0001"
-                    value={row.decision.avg_cost ?? ""}
-                    onChange={(e) => onUpdate({ avg_cost: e.target.valueAsNumber || undefined })}
-                    placeholder="单位净值/单价"
-                  />
-                </div>
-              </>
-            )}
-
-            {/* 货基/理财/现金/债券：本金 + 收益相关 */}
-            {!meta.hasShares && (
-              <div>
-                <label className="block text-muted mb-1">本金（元）</label>
-                <input
-                  className="input text-xs h-8 w-full font-mono"
-                  type="number" step="0.01"
-                  value={row.decision.principal_amount ?? ""}
-                  onChange={(e) => onUpdate({ principal_amount: e.target.valueAsNumber || undefined })}
-                />
-              </div>
-            )}
-
-            {meta.needsYield7d && (
-              <div>
-                <label className="block text-muted mb-1">7 日年化（%）</label>
-                <input
-                  className="input text-xs h-8 w-full font-mono"
-                  type="number" step="0.001"
-                  value={row.decision.yield_7d ?? ""}
-                  onChange={(e) => onUpdate({ yield_7d: e.target.valueAsNumber || undefined })}
-                />
-              </div>
-            )}
-
-            {meta.needsExpectedApr && (
-              <div>
-                <label className="block text-muted mb-1">预期年化（%）</label>
-                <input
-                  className="input text-xs h-8 w-full font-mono"
-                  type="number" step="0.001"
-                  value={row.decision.expected_apr ?? ""}
-                  onChange={(e) => onUpdate({ expected_apr: e.target.valueAsNumber || undefined })}
-                />
-              </div>
-            )}
-
-            {/* 理财 / 债券：起始 / 到期日 */}
-            {(row.decision.asset_type === "wealth" ||
-              row.decision.asset_type === "bond" ||
-              row.decision.asset_type === "money_fund") && (
-              <>
-                <div>
-                  <label className="block text-muted mb-1">起始日</label>
-                  <input
-                    className="input text-xs h-8 w-full"
-                    type="date"
-                    value={asDateInput(row.decision.start_date)}
-                    onChange={(e) => onUpdate({ start_date: e.target.value || undefined })}
-                  />
-                </div>
-                <div>
-                  <label className="block text-muted mb-1">到期日</label>
-                  <input
-                    className="input text-xs h-8 w-full"
-                    type="date"
-                    value={asDateInput(row.decision.maturity_date)}
-                    onChange={(e) => onUpdate({ maturity_date: e.target.value || undefined })}
-                  />
-                </div>
-              </>
-            )}
-
-            {/* 备注：占满整行 */}
-            <div className="col-span-2 md:col-span-4">
-              <label className="block text-muted mb-1">备注</label>
-              <input
-                className="input text-xs h-8 w-full"
-                value={row.decision.note || ""}
-                onChange={(e) => onUpdate({ note: e.target.value })}
-                placeholder="如：朝朝宝活期 / Q3 到期 / 非保本浮动收益"
-              />
-            </div>
-          </div>
-        </td>
-      </tr>
-    )}
     </>
+
   );
 }
+
+function NumberCell({
+  title, value, step, onChange, placeholder,
+}: {
+  title: string;
+  value: number | null | undefined;
+  step: string;
+  onChange: (v: number | undefined) => void;
+  placeholder?: string;
+}) {
+  return (
+    <input
+      className="input text-xs h-8 w-full min-w-[110px] font-mono"
+      type="number"
+      step={step}
+      title={title}
+      value={value ?? ""}
+      placeholder={placeholder}
+      onChange={(e) => {
+        const raw = e.currentTarget.value;
+        const n = e.currentTarget.valueAsNumber;
+        onChange(raw === "" || Number.isNaN(n) ? undefined : n);
+      }}
+    />
+  );
+}
+
 
 // ============== 工具 ==============
 
 function defaultMarketFor(t: AssetType): Market {
+
   return ASSET_TYPE_META[t].defaultMarket;
 }
 
-function fmtNum(v: number | null | undefined): string {
-  if (v == null) return "-";
-  return Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 });
-}
 
-/**
- * 把可能是 string / Date / undefined 的值，归一成 <input type="date"> 能吃的 "YYYY-MM-DD"。
- * 保险起见容忍 ISO datetime，截前 10 位即可。
- */
-function asDateInput(v: any): string {
-  if (!v) return "";
-  if (typeof v !== "string") return "";
-  // "2026-05-08T..." or "2026-05-08"
-  return v.length >= 10 ? v.slice(0, 10) : v;
-}
 
 function actionLabel(action: string): string {
   switch (action) {

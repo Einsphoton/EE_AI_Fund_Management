@@ -54,8 +54,11 @@ export default function SettingsPage() {
     use_ai: true,  // 默认复用 AI 大模型，体验最简
     base_url: "", api_key: "", model: "",
     temperature: 0.1, max_tokens: 8192, timeout: 300, concurrency: 2,
-    rpm_limit: 0, min_interval_sec: 0,
-    json_mode: true,
+    rpm_limit: 20, min_interval_sec: 0,
+    json_mode: true, auto_fill_code: true,
+    wall_timeout: 300, content_hardcap: 20000, stream: false, force_stream: false,
+
+
   });
   const [schedule, setSchedule] = useState<AppSettings["schedule"]>({ enabled: false, cron: "0 9 * * *", preset: "daily" });
 
@@ -93,7 +96,13 @@ export default function SettingsPage() {
         rpm_limit: data.vision.rpm_limit ?? 0,
         min_interval_sec: data.vision.min_interval_sec ?? 0,
         json_mode: data.vision.json_mode ?? true,
+        auto_fill_code: data.vision.auto_fill_code ?? true,
+        wall_timeout: data.vision.wall_timeout ?? 90,
+        content_hardcap: data.vision.content_hardcap ?? 20000,
+        stream: data.vision.stream ?? false,
+        force_stream: data.vision.force_stream ?? false,
       });
+
     }
     setSchedule(data.schedule);
   }, [data]);
@@ -472,40 +481,63 @@ function VisionAdvanced({
         <summary className="cursor-pointer text-muted hover:text-white/80 select-none">
           高级：图片最小间隔（兜底节流）
         </summary>
-        <div className="mt-2 pl-3 border-l-2 border-line/40">
-          <label className="label">图片最小间隔 (秒)</label>
-          <input
-            className="input"
-            type="number" step="1" min={0} max={120}
-            value={vision.min_interval_sec ?? 0}
-            onChange={(e) => set({ min_interval_sec: Math.max(0, Math.min(120, e.target.valueAsNumber || 0)) })}
-          />
-          <p className="text-[10px] text-muted mt-1 leading-relaxed">
-            两张图之间硬性最小间隔。已被 RPM 限流覆盖大多数场景，<strong className="text-white/80">通常留 0 即可</strong>。
-            仅当某些代理 RPM 看似够用却仍要求请求间隔最少 N 秒时才需要设。两个限速同时生效，谁严格谁说了算。
-          </p>
+        <div className="mt-2 pl-3 border-l-2 border-line/40 space-y-3">
+          <div>
+            <label className="label">单图硬超时 wall_timeout (秒)</label>
+            <input
+              className="input"
+              type="number" step="30" min={30} max={1800}
+              value={vision.wall_timeout ?? vision.timeout ?? 300}
+              onChange={(e) => set({ wall_timeout: Math.max(30, Math.min(1800, e.target.valueAsNumber || (vision.timeout ?? 300))) })}
+            />
+            <p className="text-[10px] text-muted mt-1 leading-relaxed">
+              OCR Agent 的墙钟总上限，超过会强制放弃当前图片。默认跟随上方 Timeout；NVIDIA NIM 排队慢时应与 Timeout 保持一致。
+            </p>
+          </div>
+          <div>
+            <label className="label">图片最小间隔 (秒)</label>
+            <input
+              className="input"
+              type="number" step="1" min={0} max={120}
+              value={vision.min_interval_sec ?? 0}
+              onChange={(e) => set({ min_interval_sec: Math.max(0, Math.min(120, e.target.valueAsNumber || 0)) })}
+            />
+            <p className="text-[10px] text-muted mt-1 leading-relaxed">
+              两张图之间硬性最小间隔。已被 RPM 限流覆盖大多数场景，<strong className="text-white/80">通常留 0 即可</strong>。
+              仅当某些代理 RPM 看似够用却仍要求请求间隔最少 N 秒时才需要设。两个限速谁严格谁说了算。
+            </p>
+          </div>
         </div>
+
       </details>
 
-      <label className="flex items-center gap-2 cursor-pointer select-none pt-1 border-t border-line/40">
-        <input
-          type="checkbox" className="accent-accent w-4 h-4"
-          checked={vision.json_mode ?? true}
-          onChange={(e) => set({ json_mode: e.target.checked })}
-        />
-        <span className="text-sm">强制 JSON 输出模式（推荐开启）</span>
-      </label>
+      <div className="space-y-2 pt-1 border-t border-line/40">
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox" className="accent-accent w-4 h-4"
+            checked={vision.json_mode ?? true}
+            onChange={(e) => set({ json_mode: e.target.checked })}
+          />
+          <span className="text-sm">强制 JSON 输出模式（推荐开启）</span>
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox" className="accent-accent w-4 h-4"
+            checked={vision.auto_fill_code ?? true}
+            onChange={(e) => set({ auto_fill_code: e.target.checked })}
+          />
+          <span className="text-sm">识别后自动补全基金/股票代码、市场和交易所（推荐开启）</span>
+        </label>
+      </div>
       <p className="text-muted leading-relaxed">
-        开启后给模型传 <code className="text-white/80">response_format=json_object</code>，
-        让 Kimi / GLM-4V / Qwen-VL / GPT-4o 等强制输出合法 JSON。
-        <strong className="text-white/80">解决"模型返回不是合法 JSON"报错的关键开关。</strong>
-        老模型/三方代理不支持时会自动降级。
+        OCR 现在按 <strong className="text-white/80">Skill + Agent Harness</strong> 执行：
+        先让多模态模型严格抽取持仓 JSON，再用天天基金 / 腾讯证券 / 新浪 / 雪球多源查码，自动补全
+        <code className="text-white/80"> code / market / exchange</code>。
       </p>
       <p className="text-muted">
-        视觉调用已启用 <strong className="text-white/80">流式输出（stream=true）</strong>，
-        若仍超时多半是网络访问 base_url 不通；
-        可打开"AI 识别过程"卡片观察首字 TTFB。
+        默认使用非流式安全路径，适合 NVIDIA NIM Kimi、本地 Qwen/Gemma 等模型；若超时，优先检查 base_url、API Key、RPM 限速和模型是否支持图片输入。
       </p>
+
     </div>
   );
 }

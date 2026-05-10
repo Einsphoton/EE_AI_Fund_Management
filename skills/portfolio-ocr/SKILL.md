@@ -96,14 +96,17 @@
 
 Schema：
 {
-  "schema": "ee-fund-mgr/portfolio-ocr@1",
+  "schema": "ee-fund-mgr/portfolio-ocr@2",
   "platform": "<识别到的平台名，未识别填'未知'>",
   "screenshot_date": "YYYY-MM-DD" 或 null,
   "items": [{
     "name": "<完整产品名>",
     "code": "<6 位基金代码 / 股票代码，没显示填 null>",
     "asset_type": "fund" | "stock" | "etf" | "money_fund" | "wealth" | "cash" | "bond",
+    "market": "A" | "HK" | "US" | "OTC" | "CNY" | "USD" | "HKD",
+    "exchange": "SH" | "SZ" | "BJ" | "HK" | "NYSE" | "NASDAQ" | "AMEX" | "OTC" | "CNY" | "USD" | "HKD" | "UNKNOWN",
     "shares": <份额/股数，货基/理财/现金可填 null>,
+
     "amount": <持有金额（元），货基/理财/现金必填>,
     "avg_cost": <平均成本/持仓单价>,
     "current_price": <最新价/净值>,
@@ -125,7 +128,8 @@ Schema：
 约束：
 1. 数值字段必须是裸数字，不带"元"/"%"/"约"等；看不清就填 null（不要瞎猜）。
 2. 一张图 5-15 项要全部列出。
-3. 不是持仓页（首页/广告/聊天）→ {"schema":"ee-fund-mgr/portfolio-ocr@1","platform":"未知","items":[]}。
+3. 不是持仓页（首页/广告/聊天）→ {"schema":"ee-fund-mgr/portfolio-ocr@2","platform":"未知","items":[]}。
+
 4. 多张图：把所有持仓项合并到同一份 JSON 的 items 数组里。
 5. 只输出一个 JSON 对象，不要任何前后说明文字、不要 markdown 代码块围栏。
 ```

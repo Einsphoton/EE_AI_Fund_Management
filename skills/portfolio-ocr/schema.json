@@ -40,7 +40,17 @@
             "enum": ["fund", "stock", "etf", "money_fund", "wealth", "cash", "bond"],
             "description": "资产类型枚举"
           },
+          "market": {
+            "type": ["string", "null"],
+            "enum": ["A", "HK", "US", "OTC", "CNY", "USD", "HKD", null],
+            "description": "App 内部市场/币种：A/HK/US/OTC/CNY/USD/HKD"
+          },
+          "exchange": {
+            "type": ["string", "null"],
+            "description": "交易所：SH/SZ/BJ/HK/NYSE/NASDAQ/AMEX/OTC/CNY/USD/HKD/UNKNOWN"
+          },
           "shares": {
+
             "type": ["number", "null"],
             "description": "份额/股数；货基/理财/现金可填 null"
           },
