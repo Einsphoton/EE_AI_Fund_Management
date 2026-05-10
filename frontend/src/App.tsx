@@ -1,6 +1,6 @@
 import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, Wallet, Boxes, Sparkles, Settings as Cog, BrainCircuit, MessageSquare, Camera, ListTodo,
+  LayoutDashboard, Wallet, Boxes, Sparkles, Settings as Cog, BrainCircuit, MessageSquare, Camera, ListTodo, Target,
 } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
 import Assets from "./pages/Assets";
@@ -11,6 +11,7 @@ import Advice from "./pages/Advice";
 import AIChat from "./pages/AIChat";
 import ImportOcr from "./pages/ImportOcr";
 import Todos from "./pages/Todos";
+import Targets from "./pages/Targets";
 import { AnalysisTaskProvider } from "./lib/analysisTask";
 import { OcrTaskProvider } from "./lib/ocrTask";
 import AnalysisTaskIndicator from "./components/AnalysisTaskIndicator";
@@ -18,11 +19,12 @@ import OcrTaskIndicator from "./components/OcrTaskIndicator";
 
 const NAV = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard, end: true },
-  { to: "/assets", label: "我的标的", icon: Wallet },
+  { to: "/assets", label: "我的资产", icon: Wallet },
+  { to: "/targets", label: "我的标的", icon: Target },
   { to: "/import", label: "OCR 导入", icon: Camera },
   { to: "/chat", label: "AI Chat", icon: MessageSquare },
-  { to: "/advice", label: "AI 建议", icon: BrainCircuit },
-  { to: "/todos", label: "To-do", icon: ListTodo },
+  { to: "/advice", label: "AI 分析我的资产", icon: BrainCircuit },
+  { to: "/todos", label: "AI 投资建议", icon: ListTodo },
   { to: "/skills", label: "Skill 市场", icon: Boxes },
   { to: "/settings", label: "设置", icon: Cog },
 ];
@@ -72,6 +74,7 @@ export default function App() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/assets" element={<Assets />} />
+              <Route path="/targets" element={<Targets />} />
               <Route path="/assets/:id" element={<AssetDetail />} />
               <Route path="/import" element={<ImportOcr />} />
               <Route path="/chat" element={<AIChat />} />

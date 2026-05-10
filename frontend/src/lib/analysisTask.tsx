@@ -113,7 +113,7 @@ export function AnalysisTaskProvider({ children }: { children: ReactNode }) {
             `批次 ${e.batch_id.slice(0, 16)}…`,
         });
         if (e.total === 0) {
-          appendLog({ kind: "info", text: "⚠️ 没有找到任何标的，先去「我的标的」添加吧" });
+          appendLog({ kind: "info", text: "⚠️ 没有找到任何资产或标的，先去「我的资产」或「我的标的」添加吧" });
         }
         break;
       case "asset_start":

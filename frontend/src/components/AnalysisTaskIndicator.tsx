@@ -7,7 +7,7 @@ import { useAnalysisTask } from "../lib/analysisTask";
  * 全局悬浮指示器：
  * - 分析进行中时在右下角出现一个胶囊
  * - 显示进度 X / Y + 百分比
- * - 点击跳转到 AI 建议页查看详情
+ * - 点击跳转到 AI 分析页查看详情
  * - 不在 /advice 页显示（那里已经有嵌入面板了）
  * - 分析完成后 6 秒自动消失（允许手动 dismiss）
  */

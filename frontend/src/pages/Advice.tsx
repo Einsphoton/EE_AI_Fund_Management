@@ -130,8 +130,8 @@ export default function Advice() {
   return (
     <>
       <PageHeader
-        title="AI 建议"
-        subtitle="Hermes-Lite Agent 按分析批次沉淀的历史建议"
+        title="AI 分析我的资产"
+        subtitle="Hermes-Lite Agent 按批次沉淀我的资产与我的标的分析报告"
         actions={
           <>
             <button
@@ -146,7 +146,7 @@ export default function Advice() {
               onClick={() => task.start()}
             >
               <BrainCircuit className="w-4 h-4" />
-              {task.running ? "分析进行中…" : "立即分析所有标的"}
+              {task.running ? "分析进行中…" : "立即分析所有资产以及标的"}
             </button>
           </>
         }
@@ -208,8 +208,8 @@ export default function Advice() {
           {advices.isLoading
             ? "加载中…"
             : filter !== "all"
-              ? "当前筛选下没有建议，切回「全部」或执行一次分析看看"
-              : "还没有建议。点击右上角「立即分析所有标的」开始"}
+              ? "当前筛选下没有分析报告，切回「全部」或执行一次分析看看"
+              : "还没有分析报告。点击右上角「立即分析所有资产以及标的」开始"}
         </div>
       ) : viewMode === "list" ? (
         <ListView

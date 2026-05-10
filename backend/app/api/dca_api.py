@@ -1,6 +1,8 @@
 """DCA suggestion API."""
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -90,6 +92,7 @@ async def create_dca_todo(
     todo.payload = payload
     todo.result = {}
     todo.due_date = now
+    todo.expires_at = now + timedelta(days=7)
     db.commit()
     db.refresh(todo)
     return todo

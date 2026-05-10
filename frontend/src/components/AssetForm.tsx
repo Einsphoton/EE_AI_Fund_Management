@@ -42,6 +42,7 @@ interface Props {
   onSubmit: (data: AssetFormData) => Promise<void> | void;
   initial?: Asset | null;
   initialTxns?: Transaction[];
+  initialDraft?: Partial<AssetFormData>;
   title?: string;
   editing?: boolean;
 }
@@ -56,7 +57,7 @@ const empty: AssetFormData = {
 const TYPE_ORDER: AssetType[] = (Object.keys(ASSET_TYPE_META) as AssetType[])
   .sort((a, b) => ASSET_TYPE_META[a].order - ASSET_TYPE_META[b].order);
 
-export default function AssetForm({ open, onClose, onSubmit, initial, initialTxns, title, editing }: Props) {
+export default function AssetForm({ open, onClose, onSubmit, initial, initialTxns, initialDraft, title, editing }: Props) {
   const [data, setData] = useState<AssetFormData>(empty);
   const [submitting, setSubmitting] = useState(false);
 
@@ -79,9 +80,9 @@ export default function AssetForm({ open, onClose, onSubmit, initial, initialTxn
       }
       setData(base);
     } else {
-      setData(empty);
+      setData({ ...empty, ...(initialDraft || {}) });
     }
-  }, [open, initial, editing, initialTxns]);
+  }, [open, initial, editing, initialTxns, initialDraft]);
 
   const meta = useMemo(() => metaOf(data.asset_type), [data.asset_type]);
 
@@ -124,7 +125,7 @@ export default function AssetForm({ open, onClose, onSubmit, initial, initialTxn
     <Modal
       open={open}
       onClose={onClose}
-      title={title || (initial ? "编辑标的" : "添加标的")}
+      title={title || (initial ? "编辑资产" : "添加资产")}
       size="lg"
       footer={
         <>

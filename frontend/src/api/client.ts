@@ -65,6 +65,7 @@ export interface Asset {
   platform: string;
   note: string;
   watch_only: boolean;
+  target_source?: "manual" | "ai" | string;
   // 理财/货基/现金/债券扩展字段
   yield_7d?: number | null;
   expected_apr?: number | null;
@@ -225,6 +226,7 @@ export interface TodoItem {
   payload: Record<string, any>;
   result: Record<string, any>;
   due_date: string | null;
+  expires_at: string | null;
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
@@ -240,9 +242,37 @@ export interface TodoResolvePayload {
   note?: string;
 }
 
+export interface BudgetStatusItem {
+  platform: string;
+  currency: string;
+  monthly_amount: number;
+  used_this_month: number;
+  remaining_budget: number;
+  asset_types?: AssetType[];
+}
+
+export interface InvestmentManagerRunResult {
+  summary: string;
+  created: number;
+  budget_status: BudgetStatusItem[];
+  todos: TodoItem[];
+}
+
+export interface BudgetStatusResponse {
+  items: BudgetStatusItem[];
+}
+
 export interface ChatMsg {
   role: "user" | "assistant" | "system";
   content: string;
+}
+
+export interface InvestmentBudgetItem {
+  platform: string;
+  currency: "CNY" | "HKD" | "USD" | string;
+  monthly_amount: number;
+  /** 该预算允许购买的资产类型：fund=场外基金，stock/etf=股票/场内基金。 */
+  asset_types?: AssetType[];
 }
 
 export interface AppSettings {
@@ -312,7 +342,8 @@ export interface AppSettings {
     force_stream?: boolean;
   };
 
-  schedule: { enabled: boolean; cron: string; preset: string };
+  schedule: { enabled: boolean; cron: string; preset: string; include_investment_plan?: boolean; include_ai_targets?: boolean };
+  investment_budget?: { items: InvestmentBudgetItem[] };
   ui: { currency: string; theme: string };
 }
 
@@ -331,6 +362,7 @@ export interface ProfilesResponse {
 export const Assets = {
   list: () => api.get<Asset[]>("/assets").then((r) => r.data),
   create: (p: any) => api.post<Asset>("/assets", p).then((r) => r.data),
+  aiTargets: (limit = 5) => api.post<Asset[]>("/assets/ai-targets", null, { params: { limit } }).then((r) => r.data),
   update: (id: number, p: any) => api.patch<Asset>(`/assets/${id}`, p).then((r) => r.data),
   remove: (id: number) => api.delete(`/assets/${id}`).then((r) => r.data),
   txns: (id: number) => api.get<Transaction[]>(`/assets/${id}/transactions`).then((r) => r.data),
@@ -529,6 +561,10 @@ export const DcaApi = {
 export const TodoApi = {
   list: (status: "pending" | "accepted" | "rejected" | "all" = "pending") =>
     api.get<TodoItem[]>("/todos", { params: { status } }).then((r) => r.data),
+  budgetStatus: () =>
+    api.get<BudgetStatusResponse>("/todos/budget-status").then((r) => r.data),
+  runAiInvestmentPlan: () =>
+    api.post<InvestmentManagerRunResult>("/todos/ai-investment-plan").then((r) => r.data),
   resolve: (id: number, payload: TodoResolvePayload) =>
     api.post<TodoItem>(`/todos/${id}/resolve`, payload).then((r) => r.data),
 };

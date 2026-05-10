@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
 from ..services import quotes as quotes_service
 from ..services import holdings as holding_service
+from ..services.target_recommender import TargetRecommendationError, recommend_ai_targets
 from ..tz import now_local
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -41,6 +42,7 @@ def create_asset(payload: schemas.AssetCreate, db: Session = Depends(get_db)):
         name=payload.name, code=payload.code, asset_type=a, market=m,
         platform=payload.platform, note=payload.note,
         watch_only=payload.watch_only,
+        target_source=payload.target_source or "manual",
         yield_7d=payload.yield_7d,
         expected_apr=payload.expected_apr,
         start_date=payload.start_date,
@@ -82,6 +84,18 @@ def create_asset(payload: schemas.AssetCreate, db: Session = Depends(get_db)):
 # 解析当成 asset_id="lookup-code" 走到 GET /{asset_id} → 404 / 422，
 # 用户在前端看到「查询失败：Not Found」就是这种坑。
 # ============================================================
+
+@router.post("/ai-targets", response_model=List[schemas.AssetOut])
+async def ai_create_targets(
+    limit: int = Query(5, ge=1, le=20),
+    db: Session = Depends(get_db),
+):
+    """让 AI 根据投资性格和预算，更新/新增“我的标的”中的 AI 推荐标的。"""
+    try:
+        return await recommend_ai_targets(db, limit=limit)
+    except TargetRecommendationError as e:
+        raise HTTPException(400, str(e))
+
 
 @router.post("/lookup-code")
 async def lookup_code(
@@ -266,7 +280,7 @@ def delete_txn(asset_id: int, txn_id: int, db: Session = Depends(get_db)):
 # -------------- holdings summary --------------
 @router.get("/summary/all")
 async def list_holdings(db: Session = Depends(get_db)):
-    """并发拉取所有标的实时价，避免 N 次串行 HTTP."""
+    """并发拉取所有资产以及标的实时价，避免 N 次串行 HTTP."""
     import asyncio
 
     assets = db.query(models.Asset).all()
@@ -289,6 +303,7 @@ async def list_holdings(db: Session = Depends(get_db)):
                 "id": asset.id, "name": asset.name, "code": asset.code,
                 "asset_type": asset.asset_type.value, "market": asset.market.value,
                 "platform": asset.platform, "watch_only": asset.watch_only,
+                "target_source": asset.target_source or "manual",
                 "note": asset.note,
                 "yield_7d": asset.yield_7d,
                 "expected_apr": asset.expected_apr,

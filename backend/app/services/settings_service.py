@@ -131,6 +131,13 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "cron": "0 9 * * *",      # 每天 9:00
         "preset": "daily",         # daily | every6h | weekly | custom
+        "include_investment_plan": False,  # 定时分析后是否顺带生成 AI 投资经理待确认建议
+        "include_ai_targets": False,       # 定时分析后是否顺带更新 AI 推荐标的
+    },
+    "investment_budget": {
+        # 平台月投资额度：[{platform, currency, monthly_amount, asset_types}]
+        # asset_types 可包含 fund / stock / etf；同一平台可配置多个币种。
+        "items": [],
     },
     "ui": {
         "currency": "CNY",

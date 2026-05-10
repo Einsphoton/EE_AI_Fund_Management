@@ -15,6 +15,7 @@ class AssetBase(BaseModel):
     platform: str = ""
     note: str = ""
     watch_only: bool = False
+    target_source: str = "manual"
     # 理财/货基/现金/债券扩展字段（fund/stock 类型留空即可）
     yield_7d: float | None = None
     expected_apr: float | None = None
@@ -40,6 +41,7 @@ class AssetUpdate(BaseModel):
     platform: str | None = None
     note: str | None = None
     watch_only: bool | None = None
+    target_source: str | None = None
     yield_7d: float | None = None
     expected_apr: float | None = None
     start_date: datetime | None = None
@@ -81,6 +83,13 @@ class TransactionOut(TransactionBase):
 
 
 # ---------- Todo ----------
+class InvestmentManagerRunOut(BaseModel):
+    summary: str = ""
+    created: int = 0
+    budget_status: list[dict] = []
+    todos: list[dict] = []
+
+
 class TodoResolvePayload(BaseModel):
     decision: str = Field(..., description="accept | reject")
     shares: float | None = None
@@ -102,6 +111,7 @@ class TodoOut(BaseModel):
     payload: dict = {}
     result: dict = {}
     due_date: datetime | None = None
+    expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     resolved_at: datetime | None = None

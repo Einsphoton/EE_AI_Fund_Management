@@ -56,11 +56,19 @@ def run_migrations() -> None:
                     "WHERE extra IS NULL OR extra = ''"
                 ))
 
+    # todo_items: 新增 expires_at
+    if "todo_items" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("todo_items")}
+        with engine.begin() as conn:
+            if "expires_at" not in cols:
+                conn.execute(text("ALTER TABLE todo_items ADD COLUMN expires_at DATETIME"))
+
     # ---------------- assets 扩展（理财/货基/现金字段） ----------------
     if "assets" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("assets")}
         with engine.begin() as conn:
             new_cols = [
+                ("target_source", "VARCHAR(16) DEFAULT 'manual'"),
                 ("yield_7d", "FLOAT"),
                 ("expected_apr", "FLOAT"),
                 ("start_date", "DATETIME"),
@@ -71,6 +79,10 @@ def run_migrations() -> None:
             for col, ddl in new_cols:
                 if col not in cols:
                     conn.execute(text(f"ALTER TABLE assets ADD COLUMN {col} {ddl}"))
+            conn.execute(text(
+                "UPDATE assets SET target_source='ai' "
+                "WHERE watch_only = 1 AND (note LIKE 'AI加入标的池%' OR note LIKE 'AI推荐标的%')"
+            ))
 
         # 旧 SQLite 库的 assets / transactions 表上有 Enum CHECK 约束
         # （`asset_type IN ('fund','stock')` 等），新枚举值会被拒绝。

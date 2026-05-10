@@ -3,21 +3,91 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Save, Camera, Check, User, BookOpen, Zap,
   AlertTriangle, Trash2, Loader2, X,
-  Download, Upload, Database, FileJson, FileSpreadsheet,
+  Download, Upload, Database, FileJson, FileSpreadsheet, Plus,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
 import PageHeader from "../components/PageHeader";
 import LLMConfigCard, { LLMPreset, LLMConfigState } from "../components/LLMConfigCard";
-import { Settings as SettingsApi, AppSettings, Admin, ImportResult } from "../api/client";
+import { Settings as SettingsApi, AppSettings, Admin, ImportResult, InvestmentBudgetItem, AssetType } from "../api/client";
 
 const PRESETS: Record<string, string> = {
   hourly: "每小时",
   every6h: "每 6 小时",
   daily: "每天 09:00",
   weekly: "每周一 09:00",
-  custom: "自定义 cron",
+  custom: "自定义",
 };
+
+type CustomScheduleMode = "daily" | "weekly" | "hourly";
+
+interface CustomScheduleUi {
+  mode: CustomScheduleMode;
+  minute: number;
+  hour: number;
+  weekday: number;
+  intervalHours: number;
+}
+
+const WEEKDAYS = [
+  { value: 1, label: "周一" },
+  { value: 2, label: "周二" },
+  { value: 3, label: "周三" },
+  { value: 4, label: "周四" },
+  { value: 5, label: "周五" },
+  { value: 6, label: "周六" },
+  { value: 0, label: "周日" },
+];
+
+const clampInt = (value: unknown, min: number, max: number, fallback: number) => {
+  const n = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+};
+
+function parseCustomCron(cron: string | undefined): CustomScheduleUi {
+  const [minuteRaw, hourRaw, dayRaw, monthRaw, weekRaw] = String(cron || "0 9 * * *").trim().split(/\s+/);
+  const minute = clampInt(minuteRaw, 0, 59, 0);
+  if (hourRaw?.startsWith("*/")) {
+    return {
+      mode: "hourly",
+      minute,
+      hour: 9,
+      weekday: 1,
+      intervalHours: clampInt(hourRaw.slice(2), 1, 23, 6),
+    };
+  }
+  if (dayRaw === "*" && monthRaw === "*" && weekRaw && weekRaw !== "*") {
+    return {
+      mode: "weekly",
+      minute,
+      hour: clampInt(hourRaw, 0, 23, 9),
+      weekday: clampInt(weekRaw, 0, 6, 1),
+      intervalHours: 6,
+    };
+  }
+  return {
+    mode: "daily",
+    minute,
+    hour: clampInt(hourRaw, 0, 23, 9),
+    weekday: 1,
+    intervalHours: 6,
+  };
+}
+
+function buildCustomCron(v: CustomScheduleUi): string {
+  if (v.mode === "hourly") return `${v.minute} */${v.intervalHours} * * *`;
+  if (v.mode === "weekly") return `${v.minute} ${v.hour} * * ${v.weekday}`;
+  return `${v.minute} ${v.hour} * * *`;
+}
+
+function describeCustomSchedule(v: CustomScheduleUi): string {
+  const mm = String(v.minute).padStart(2, "0");
+  const hh = String(v.hour).padStart(2, "0");
+  if (v.mode === "hourly") return `每 ${v.intervalHours} 小时，在第 ${mm} 分钟运行一次`;
+  if (v.mode === "weekly") return `每${WEEKDAYS.find((x) => x.value === v.weekday)?.label || "周一"} ${hh}:${mm} 运行`;
+  return `每天 ${hh}:${mm} 运行`;
+}
 
 const AI_PRESETS: LLMPreset[] = [
   { name: "DeepSeek", base_url: "https://api.deepseek.com/v1" },
@@ -60,7 +130,8 @@ export default function SettingsPage() {
 
 
   });
-  const [schedule, setSchedule] = useState<AppSettings["schedule"]>({ enabled: false, cron: "0 9 * * *", preset: "daily" });
+  const [schedule, setSchedule] = useState<AppSettings["schedule"]>({ enabled: false, cron: "0 9 * * *", preset: "daily", include_investment_plan: false, include_ai_targets: false });
+  const [budgetItems, setBudgetItems] = useState<InvestmentBudgetItem[]>([]);
 
   useEffect(() => {
     if (!data) return;
@@ -105,6 +176,7 @@ export default function SettingsPage() {
 
     }
     setSchedule(data.schedule);
+    setBudgetItems(data.investment_budget?.items ?? []);
   }, [data]);
 
   const save = useMutation({
@@ -112,6 +184,7 @@ export default function SettingsPage() {
       await SettingsApi.put("ai", ai);
       await SettingsApi.put("schedule", schedule);
       await SettingsApi.put("vision", vision);
+      await SettingsApi.put("investment_budget", { items: budgetItems });
     },
     onSuccess: () => {
       toast.success("配置已保存并生效");
@@ -167,7 +240,7 @@ export default function SettingsPage() {
     <>
       <PageHeader
         title="设置"
-        subtitle="AI 大模型 / 视觉模型 / 定时分析 / 投资性格"
+        subtitle="AI 大模型 / 视觉模型 / 定时分析 / 投资性格 / 平台预算"
         actions={
           <button className="btn-primary" onClick={() => save.mutate()} disabled={save.isPending}>
             <Save className="w-4 h-4" /> {save.isPending ? "保存中…" : "保存全部"}
@@ -266,16 +339,32 @@ export default function SettingsPage() {
         <div className="card p-5">
           <h3 className="font-semibold mb-1">定时 AI 分析</h3>
           <p className="text-xs text-muted mb-4">
-            启用后，AI Agent 会按设定频次自动分析所有标的，并生成「AI 建议」。
+            启用后，AI Agent 会按设定频次自动分析所有资产以及标的，并生成「AI 分析我的资产」报告。
           </p>
 
-          <label className="flex items-center gap-2 cursor-pointer mb-4 select-none">
+          <label className="flex items-center gap-2 cursor-pointer mb-3 select-none">
             <input
               type="checkbox" className="accent-accent w-4 h-4"
               checked={schedule.enabled}
               onChange={(e) => setSchedule({ ...schedule, enabled: e.target.checked })}
             />
             启用定时分析
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer mb-3 select-none">
+            <input
+              type="checkbox" className="accent-accent w-4 h-4"
+              checked={!!schedule.include_investment_plan}
+              onChange={(e) => setSchedule({ ...schedule, include_investment_plan: e.target.checked })}
+            />
+            定时分析后顺带生成 AI 投资建议
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer mb-4 select-none">
+            <input
+              type="checkbox" className="accent-accent w-4 h-4"
+              checked={!!schedule.include_ai_targets}
+              onChange={(e) => setSchedule({ ...schedule, include_ai_targets: e.target.checked })}
+            />
+            定时分析后顺带更新 AI 推荐标的
           </label>
 
           <label className="label">频次预设</label>
@@ -292,20 +381,15 @@ export default function SettingsPage() {
           </div>
 
           {schedule.preset === "custom" && (
-            <>
-              <label className="label mt-4">Cron 表达式</label>
-              <input
-                className="input"
-                placeholder="0 9 * * *"
-                value={schedule.cron}
-                onChange={(e) => setSchedule({ ...schedule, cron: e.target.value })}
-              />
-              <p className="text-[11px] text-muted mt-1">
-                示例：<code>0 9 * * *</code> 每天 9 点；<code>0 */4 * * *</code> 每 4 小时
-              </p>
-            </>
+            <CustomScheduleEditor
+              cron={schedule.cron}
+              onChange={(cron) => setSchedule({ ...schedule, cron })}
+            />
           )}
         </div>
+
+        {/* ============ 平台月投资额度 ============ */}
+        <BudgetSettingsCard items={budgetItems} onChange={setBudgetItems} />
 
         {/* ============ 投资者性格 ============ */}
         <div className="card p-5 lg:col-span-2">
@@ -380,6 +464,216 @@ export default function SettingsPage() {
         <DangerZoneCard />
       </div>
     </>
+  );
+}
+
+function CustomScheduleEditor({ cron, onChange }: {
+  cron: string;
+  onChange: (cron: string) => void;
+}) {
+  const value = parseCustomCron(cron);
+  const update = (patch: Partial<CustomScheduleUi>) => {
+    const next = { ...value, ...patch };
+    onChange(buildCustomCron(next));
+  };
+
+  return (
+    <div className="mt-4 rounded-xl border border-line bg-bg-soft/30 p-4">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-medium">自定义运行时间</div>
+          <div className="text-[11px] text-muted mt-0.5">无需手写 Cron，通过下面选项生成定时规则。</div>
+        </div>
+        <div className="text-[11px] text-accent-soft font-mono shrink-0">{cron || buildCustomCron(value)}</div>
+      </div>
+
+      <div className="grid md:grid-cols-4 gap-3 items-end">
+        <div>
+          <label className="label">运行方式</label>
+          <select
+            className="input"
+            value={value.mode}
+            onChange={(e) => update({ mode: e.target.value as CustomScheduleMode })}
+          >
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+            <option value="hourly">每隔几小时</option>
+          </select>
+        </div>
+
+        {value.mode === "weekly" && (
+          <div>
+            <label className="label">星期</label>
+            <select
+              className="input"
+              value={value.weekday}
+              onChange={(e) => update({ weekday: clampInt(e.target.value, 0, 6, 1) })}
+            >
+              {WEEKDAYS.map((d) => (
+                <option key={d.value} value={d.value}>{d.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {value.mode === "hourly" ? (
+          <div>
+            <label className="label">间隔小时</label>
+            <input
+              className="input font-mono"
+              type="number"
+              min={1}
+              max={23}
+              step={1}
+              value={value.intervalHours}
+              onChange={(e) => update({ intervalHours: clampInt(e.currentTarget.value, 1, 23, 6) })}
+            />
+          </div>
+        ) : (
+          <div>
+            <label className="label">小时</label>
+            <select
+              className="input font-mono"
+              value={value.hour}
+              onChange={(e) => update({ hour: clampInt(e.target.value, 0, 23, 9) })}
+            >
+              {Array.from({ length: 24 }, (_, h) => (
+                <option key={h} value={h}>{String(h).padStart(2, "0")}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div>
+          <label className="label">分钟</label>
+          <select
+            className="input font-mono"
+            value={value.minute}
+            onChange={(e) => update({ minute: clampInt(e.target.value, 0, 59, 0) })}
+          >
+            {Array.from({ length: 60 }, (_, m) => m).map((m) => (
+              <option key={m} value={m}>{String(m).padStart(2, "0")}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-xs text-white/80">
+        当前规则：<span className="text-accent-soft">{describeCustomSchedule(value)}</span>
+      </div>
+    </div>
+  );
+}
+
+function BudgetSettingsCard({ items, onChange }: {
+  items: InvestmentBudgetItem[];
+  onChange: (items: InvestmentBudgetItem[]) => void;
+}) {
+  const add = () => onChange([...items, { platform: "", currency: "CNY", monthly_amount: 1000, asset_types: ["fund"] }]);
+  const update = (idx: number, patch: Partial<InvestmentBudgetItem>) => {
+    onChange(items.map((it, i) => i === idx ? { ...it, ...patch } : it));
+  };
+  const remove = (idx: number) => onChange(items.filter((_, i) => i !== idx));
+  const toggleAssetType = (idx: number, type: AssetType) => {
+    const cur = items[idx]?.asset_types ?? [];
+    const exists = cur.includes(type);
+    const next = exists ? cur.filter((x) => x !== type) : [...cur, type];
+    update(idx, { asset_types: next });
+  };
+
+  return (
+    <div className="card p-5 lg:col-span-2">
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div>
+          <h3 className="font-semibold mb-1 flex items-center gap-2">
+            <Database className="w-4 h-4 text-accent" /> 平台月投资额度
+          </h3>
+          <p className="text-xs text-muted leading-relaxed">
+            按购买平台、币种和可购买资产类型设置每月可投入预算。同一平台可添加多个币种，例如富途 HKD 2000 + USD 2000。
+          </p>
+        </div>
+        <button className="btn !px-3 !py-1.5 text-xs" onClick={add} type="button">
+          <Plus className="w-3.5 h-3.5" /> 添加预算
+        </button>
+      </div>
+
+      {items.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-line p-5 text-center text-sm text-muted">
+          暂未设置预算。AI 投资经理需要预算后才会生成可执行投资建议。
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {items.map((it, idx) => (
+            <div key={idx} className="grid md:grid-cols-[1fr_120px_180px_auto] gap-2 items-end rounded-xl border border-line/60 bg-bg-soft/30 p-3">
+              <div>
+                <label className="label">购买平台</label>
+                <input
+                  className="input"
+                  placeholder="例如：支付宝 / 微信理财通 / 富途"
+                  value={it.platform}
+                  onChange={(e) => update(idx, { platform: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="label">币种</label>
+                <select
+                  className="input"
+                  value={it.currency}
+                  onChange={(e) => update(idx, { currency: e.target.value })}
+                >
+                  <option value="CNY">CNY</option>
+                  <option value="HKD">HKD</option>
+                  <option value="USD">USD</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">月额度</label>
+                <input
+                  className="input font-mono"
+                  type="number"
+                  min={0}
+                  step={100}
+                  value={it.monthly_amount ?? 0}
+                  onChange={(e) => update(idx, { monthly_amount: e.currentTarget.valueAsNumber || 0 })}
+                />
+              </div>
+              <button className="btn !text-rose2 hover:!border-rose2/60" onClick={() => remove(idx)} type="button">
+                <X className="w-4 h-4" /> 删除
+              </button>
+              <div className="md:col-span-4 border-t border-line/40 pt-3">
+                <div className="label mb-2">可购买资产类型</div>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { type: "fund" as AssetType, label: "场外基金" },
+                    { type: "stock" as AssetType, label: "股票" },
+                    { type: "etf" as AssetType, label: "ETF / 场内基金" },
+                  ]).map((opt) => {
+                    const active = (it.asset_types ?? []).includes(opt.type);
+                    return (
+                      <button
+                        key={opt.type}
+                        type="button"
+                        className={`px-3 py-1.5 rounded-lg border text-xs transition ${
+                          active
+                            ? "border-accent/60 bg-accent/15 text-white"
+                            : "border-line text-muted hover:text-white hover:border-accent/40"
+                        }`}
+                        onClick={() => toggleAssetType(idx, opt.type)}
+                      >
+                        {active && <Check className="w-3 h-3 inline mr-1" />}{opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {(it.asset_types ?? []).length === 0 && (
+                  <div className="text-[10px] text-amber2 mt-2">至少选择一种类型，否则 AI 不会使用这条预算。</div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

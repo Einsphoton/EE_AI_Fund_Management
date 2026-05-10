@@ -140,7 +140,7 @@ async def analyze_one(
 
 
 async def analyze_all(batch_id: Optional[str] = None) -> int:
-    """供调度器调用：分析所有标的（含 watch-only），统一 source=batch。
+    """供调度器调用：分析所有资产以及标的（含 watch-only），统一 source=batch。
 
     使用 settings.ai.batch_concurrency 控制并发度（默认 4）。
     """
@@ -194,7 +194,7 @@ def _resolve_concurrency(ai_cfg: dict[str, Any]) -> int:
 
 # ---- 流式版：并发执行，谁先完成谁先向调用方推送事件 ----
 async def analyze_all_stream() -> AsyncIterator[dict]:
-    """分析所有标的并流式产出进度事件（并发版）。
+    """分析所有资产以及标的并流式产出进度事件（并发版）。
 
     事件类型：
     - {"type":"start", "batch_id":..., "total":N, "concurrency":C,

@@ -19,7 +19,7 @@ export default function Dashboard() {
   });
 
   const onRunAll = () => {
-    // 启动全局任务并跳转到 AI 建议页查看实时进度
+    // 启动全局任务并跳转到 AI 分析页查看实时进度
     task.start();
     nav("/advice");
   };
@@ -27,14 +27,15 @@ export default function Dashboard() {
   const list: Holding[] = holdings.data || [];
   const totalCost = list.reduce((s, h) => s + (h.total_cost || 0), 0);
   const totalValue = list.reduce((s, h) => s + (h.market_value || 0), 0);
-  const totalProfit = totalValue ? totalValue - totalCost : 0;
-  const totalProfitPct = totalCost > 0 ? (totalProfit / totalCost) * 100 : null;
+  const holdingReceivable = list.reduce((s, h) => s + (h.profit || 0), 0);
+  const realizedReceivable = list.reduce((s, h) => s + (h.realized_pnl || 0), 0);
+  const holdingReceivablePct = totalCost > 0 ? (holdingReceivable / totalCost) * 100 : null;
 
   return (
     <>
       <PageHeader
         title="仪表盘"
-        subtitle="一览总资产、当日表现与最新 AI 建议"
+        subtitle="一览总资产、当日表现与最新 AI 分析"
         actions={
           <>
             <button
@@ -55,27 +56,32 @@ export default function Dashboard() {
         }
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="总成本" value={fmtMoney(totalCost)} hint={`持有 ${list.length} 个标的`} />
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <StatCard label="总成本" value={fmtMoney(totalCost)} hint={`持有 ${list.length} 个资产`} />
         <StatCard
           label="持仓市值"
           value={totalValue ? fmtMoney(totalValue) : "—"}
           tone="accent"
         />
         <StatCard
-          label="累计盈亏"
-          value={totalValue ? fmtMoney(totalProfit) : "—"}
-          tone={totalProfit >= 0 ? "success" : "danger"}
+          label="持仓应收"
+          value={totalValue ? fmtMoney(holdingReceivable) : "—"}
+          tone={holdingReceivable >= 0 ? "success" : "danger"}
           delta={
-            totalProfitPct !== null ? (
-              <span className={totalProfit >= 0 ? "text-emerald2" : "text-rose2"}>
-                {fmtPct(totalProfitPct)}
+            holdingReceivablePct !== null ? (
+              <span className={holdingReceivable >= 0 ? "text-emerald2" : "text-rose2"}>
+                {fmtPct(holdingReceivablePct)}
               </span>
             ) : null
           }
         />
         <StatCard
-          label="最新 AI 建议"
+          label="已实现应收"
+          value={fmtMoney(realizedReceivable)}
+          tone={realizedReceivable >= 0 ? "success" : "danger"}
+        />
+        <StatCard
+          label="最新 AI 分析"
           value={
             advices.data?.[0] ? (
               <span className={actionColor(advices.data[0].action)}>
@@ -100,7 +106,7 @@ export default function Dashboard() {
 
           {list.length === 0 ? (
             <div className="text-center text-muted py-10 text-sm">
-              还没有标的，去「我的标的」添加吧
+              还没有资产，去「我的资产」添加吧
             </div>
           ) : (
             <>
@@ -111,7 +117,7 @@ export default function Dashboard() {
               <div className="h-3" />
               <HoldingMiniTable
                 title="股票 / 场内基金"
-                items={list.filter((h) => h.asset.asset_type === "stock")}
+                items={list.filter((h) => h.asset.asset_type === "stock" || h.asset.asset_type === "etf")}
               />
             </>
           )}
@@ -119,7 +125,7 @@ export default function Dashboard() {
 
         <div className="card p-5">
           <h3 className="font-semibold flex items-center gap-2 mb-4">
-            <BrainCircuit className="w-4 h-4 text-accent" /> 最新 AI 建议
+            <BrainCircuit className="w-4 h-4 text-accent" /> 最新 AI 分析
           </h3>
           <div className="space-y-3">
             {(advices.data || []).slice(0, 6).map((a) => (
@@ -165,7 +171,7 @@ function HoldingMiniTable({ title, items }: { title: string; items: Holding[] })
         <table className="w-full text-sm">
           <thead className="text-xs text-muted">
             <tr>
-              <th className="text-left px-2 py-1.5 font-normal">标的</th>
+              <th className="text-left px-2 py-1.5 font-normal">资产</th>
               <th className="text-right px-2 py-1.5 font-normal">成本</th>
               <th className="text-right px-2 py-1.5 font-normal">市值</th>
               <th className="text-right px-2 py-1.5 font-normal">盈亏</th>

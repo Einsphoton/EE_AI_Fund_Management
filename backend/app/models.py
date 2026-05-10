@@ -53,6 +53,7 @@ class Asset(Base):
     platform = Column(String(64), default="")                    # 买入平台
     note = Column(Text, default="")
     watch_only = Column(Boolean, default=False)                  # 仅观察、未实质买入
+    target_source = Column(String(16), default="manual", index=True)  # manual / ai，用于区分标的来源
 
     # ---- 理财/货基/现金扩展字段（fund/stock 类型留空） ----
     # 货基：当前 7 日年化（百分比，如 1.85 表示 1.85%），无需每日抓行情
@@ -171,6 +172,7 @@ class TodoItem(Base):
     payload = Column(JSON, default={})                                  # 建议详情与默认交易参数
     result = Column(JSON, default={})                                   # 用户确认后的结果
     due_date = Column(DateTime, default=now_local, index=True)
+    expires_at = Column(DateTime, nullable=True, index=True)                # 到期未处理则自动视为不采纳
     created_at = Column(DateTime, default=now_local)
     updated_at = Column(DateTime, default=now_local, onupdate=now_local)
     resolved_at = Column(DateTime, nullable=True)

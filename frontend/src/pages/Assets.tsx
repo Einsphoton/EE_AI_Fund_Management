@@ -11,12 +11,24 @@ import { Assets as AssetApi, Asset, AssetType, Holding, Transaction } from "../a
 import { ASSET_TYPE_META } from "../lib/assetMeta";
 import { fmtMoney, fmtPct } from "../lib/format";
 
+type GroupMode = "asset_type" | "platform";
+
+interface HoldingTotals {
+  cost: number;
+  value: number;
+  holdingReceivable: number;
+  realizedReceivable: number;
+  holdingPct: number | null;
+}
+
 export default function Assets() {
   const qc = useQueryClient();
-  const { data: holdings = [] } = useQuery({
+  const { data: holdingsRaw = [] } = useQuery({
     queryKey: ["holdings"], queryFn: AssetApi.holdings,
   });
+  const holdings = holdingsRaw.filter((h) => !h.asset.watch_only);
 
+  const [groupMode, setGroupMode] = useState<GroupMode>("asset_type");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Asset | null>(null);
   const [editingTxns, setEditingTxns] = useState<Transaction[] | undefined>();
@@ -25,8 +37,8 @@ export default function Assets() {
   const create = useMutation({
     mutationFn: (p: AssetFormData) => AssetApi.create(p),
     onSuccess: (newAsset) => {
-      toast.success("已添加标的");
-      // 乐观写入：立即把新标的塞进 holdings 缓存，UI 不等行情刷新
+      toast.success("已添加资产");
+      // 乐观写入：立即把新资产塞进 holdings 缓存，UI 不等行情刷新
       qc.setQueryData<Holding[]>(["holdings"], (old = []) => [
         ...old,
         {
@@ -120,7 +132,21 @@ export default function Assets() {
   };
 
   const groups = useMemo(() => {
-    // 按资产类型分组（按 ASSET_TYPE_META.order 排序）
+    if (groupMode === "platform") {
+      const byPlatform: Record<string, Holding[]> = {};
+      for (const h of holdings) {
+        const p = (h.asset.platform || "未填写平台").trim() || "未填写平台";
+        (byPlatform[p] ||= []).push(h);
+      }
+      return Object.keys(byPlatform)
+        .sort((a, b) => a.localeCompare(b, "zh-CN"))
+        .map((platform) => ({
+          key: `platform:${platform}`,
+          title: platform,
+          list: byPlatform[platform],
+        }));
+    }
+
     const byType: Record<string, Holding[]> = {};
     for (const h of holdings) {
       const t = h.asset.asset_type || "fund";
@@ -130,45 +156,62 @@ export default function Assets() {
       .sort((a, b) => ASSET_TYPE_META[a as AssetType].order - ASSET_TYPE_META[b as AssetType].order)
       .filter((t) => byType[t] && byType[t].length > 0)
       .map((t) => ({
-        type: t as AssetType,
-        meta: ASSET_TYPE_META[t as AssetType],
+        key: `type:${t}`,
+        title: ASSET_TYPE_META[t as AssetType].label,
         list: byType[t],
       }));
-  }, [holdings]);
+  }, [holdings, groupMode]);
 
-  const totalsOf = (list: Holding[]) => {
+  const totalsOf = (list: Holding[]): HoldingTotals => {
     const cost = list.reduce((s, h) => s + (h.total_cost || 0), 0);
     const value = list.reduce((s, h) => s + (h.market_value || 0), 0);
-    const profit = value ? value - cost : 0;
-    const pct = cost > 0 && value ? (profit / cost) * 100 : null;
-    return { cost, value, profit, pct };
+    const holdingReceivable = list.reduce((s, h) => s + (h.profit || 0), 0);
+    const realizedReceivable = list.reduce((s, h) => s + (h.realized_pnl || 0), 0);
+    const holdingPct = cost > 0 ? (holdingReceivable / cost) * 100 : null;
+    return { cost, value, holdingReceivable, realizedReceivable, holdingPct };
   };
 
   return (
     <>
       <PageHeader
-        title="我的标的"
+        title="我的资产"
         subtitle="基金 / 股票 / 理财 / 现金等多类资产分组管理"
         actions={
-          <button
-            className="btn-primary"
-            onClick={() => { setEditing(null); setEditingTxns(undefined); setOpen(true); }}
-          >
-            <Plus className="w-4 h-4" /> 添加标的
-          </button>
+          <>
+            <div className="inline-flex rounded-xl border border-line bg-bg-soft/40 p-0.5 text-xs">
+              <button
+                className={`px-3 py-1.5 rounded-lg transition ${groupMode === "asset_type" ? "bg-accent/15 text-white border border-accent/40" : "text-muted hover:text-white"}`}
+                onClick={() => setGroupMode("asset_type")}
+              >
+                按类型
+              </button>
+              <button
+                className={`px-3 py-1.5 rounded-lg transition ${groupMode === "platform" ? "bg-accent/15 text-white border border-accent/40" : "text-muted hover:text-white"}`}
+                onClick={() => setGroupMode("platform")}
+              >
+                按平台
+              </button>
+            </div>
+            <button
+              className="btn-primary"
+              onClick={() => { setEditing(null); setEditingTxns(undefined); setOpen(true); }}
+            >
+              <Plus className="w-4 h-4" /> 添加资产
+            </button>
+          </>
         }
       />
 
       {groups.length === 0 && (
         <div className="card p-10 text-center text-muted">
-          还没有任何资产，点右上角「添加标的」开始
+          还没有任何持有资产，点右上角「添加资产」开始；观察池请到「我的标的」。
         </div>
       )}
 
       {groups.map((g, i) => (
-        <div key={g.type} className={i > 0 ? "mt-6" : ""}>
+        <div key={g.key} className={i > 0 ? "mt-6" : ""}>
           <Section
-            title={g.meta.label}
+            title={g.title}
             icon={<Wallet className="w-4 h-4 text-accent" />}
             list={g.list}
             totals={totalsOf(g.list)}
@@ -208,7 +251,7 @@ interface SectionProps {
   title: string;
   icon: React.ReactNode;
   list: Holding[];
-  totals: { cost: number; value: number; profit: number; pct: number | null };
+  totals: HoldingTotals;
   onEdit: (a: Asset) => void;
   onAnalyze: (a: Asset) => void;
   onDelete: (a: Asset) => void;
@@ -232,9 +275,12 @@ function Section({ title, icon, list, totals, onEdit, onAnalyze, onDelete, empty
             <span className="text-muted">
               市值 <span className="text-accent-soft font-medium font-mono">{fmtMoney(totals.value)}</span>
             </span>
-            <span className={totals.profit >= 0 ? "text-emerald2" : "text-rose2"}>
-              {fmtMoney(totals.profit)}
-              {totals.pct !== null && <span className="ml-1">({fmtPct(totals.pct)})</span>}
+            <span className={totals.holdingReceivable >= 0 ? "text-emerald2" : "text-rose2"}>
+              持仓应收 {fmtMoney(totals.holdingReceivable)}
+              {totals.holdingPct !== null && <span className="ml-1">({fmtPct(totals.holdingPct)})</span>}
+            </span>
+            <span className={totals.realizedReceivable >= 0 ? "text-emerald2" : "text-rose2"}>
+              已实现应收 {fmtMoney(totals.realizedReceivable)}
             </span>
           </div>
         )}
@@ -243,7 +289,7 @@ function Section({ title, icon, list, totals, onEdit, onAnalyze, onDelete, empty
       <table className="w-full text-sm">
         <thead className="text-xs text-muted bg-bg-soft/50">
           <tr>
-            <th className="text-left px-4 py-3">标的</th>
+            <th className="text-left px-4 py-3">资产</th>
             <th className="text-left px-4 py-3">平台</th>
             <th className="text-right px-4 py-3">持仓</th>
             <th className="text-right px-4 py-3">成本</th>
@@ -283,6 +329,9 @@ function Section({ title, icon, list, totals, onEdit, onAnalyze, onDelete, empty
               <td className={`text-right px-4 py-3 font-mono tabular-nums ${(h.profit ?? 0) >= 0 ? "text-emerald2" : "text-rose2"}`}>
                 {fmtMoney(h.profit)}
                 <div className="text-[11px]">{fmtPct(h.profit_pct)}</div>
+              </td>
+              <td className={`text-right px-4 py-3 font-mono tabular-nums ${(h.realized_pnl ?? 0) >= 0 ? "text-emerald2" : "text-rose2"}`}>
+                {fmtMoney(h.realized_pnl || 0)}
               </td>
               <td className="text-right px-4 py-3">
                 <div className="inline-flex gap-1">

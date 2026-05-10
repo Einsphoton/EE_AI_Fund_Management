@@ -7,6 +7,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .database import SessionLocal
 from .services import settings_service
+from .services.investment_manager import run_investment_manager
+from .services.target_recommender import recommend_ai_targets
 from .agent.analyzer import analyze_all
 
 
@@ -32,9 +34,31 @@ def _resolve_cron(schedule_cfg: dict) -> str | None:
 
 
 async def _job_runner():
+    db = SessionLocal()
+    try:
+        cfg = settings_service.get(db, "schedule") or {}
+    finally:
+        db.close()
+
     try:
         n = await analyze_all()
-        print(f"[scheduler] analyzed {n} assets")
+        print(f"[scheduler] analyzed {n} assets/targets")
+
+        if cfg.get("include_investment_plan"):
+            db = SessionLocal()
+            try:
+                r = await run_investment_manager(db)
+                print(f"[scheduler] investment todos created {r.get('created', 0)}")
+            finally:
+                db.close()
+
+        if cfg.get("include_ai_targets"):
+            db = SessionLocal()
+            try:
+                targets = await recommend_ai_targets(db, limit=5)
+                print(f"[scheduler] ai targets refreshed {len(targets)}")
+            finally:
+                db.close()
     except Exception as e:  # pragma: no cover
         print(f"[scheduler] failed: {e}")
 
@@ -67,7 +91,7 @@ def reload_schedule() -> str | None:
     except Exception:
         trigger = CronTrigger.from_crontab(PRESET_CRON["daily"], timezone="Asia/Shanghai")
         cron = PRESET_CRON["daily"]
-    sch.add_job(_job_runner, trigger=trigger, id=_JOB_ID, replace_existing=True)
+    sch.add_job(_job_runner, trigger=trigger, id=_JOB_ID, replace_existing=True, max_instances=1, coalesce=True)
     return cron
 
 

@@ -534,7 +534,7 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
       } else {
         toast.success(`${msg}（共 ${total} 项）`);
       }
-      // 关键：失效相关查询缓存，让"我的标的 / 仪表盘 / 资产详情"页面下次进入立即看到新数据
+      // 关键：失效相关查询缓存，让"我的资产 / 仪表盘 / 资产详情"页面下次进入立即看到新数据
       qc.invalidateQueries({ queryKey: ["holdings"] });
       qc.invalidateQueries({ queryKey: ["assets"] });
       // 提交完成 → 清空状态
