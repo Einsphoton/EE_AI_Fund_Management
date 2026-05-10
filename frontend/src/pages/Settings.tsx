@@ -4,12 +4,15 @@ import {
   Save, Camera, Check, User, BookOpen, Zap,
   AlertTriangle, Trash2, Loader2, X,
   Download, Upload, Database, FileJson, FileSpreadsheet, Plus,
+  RefreshCw, Rocket, ShieldCheck,
 } from "lucide-react";
+
 import toast from "react-hot-toast";
 
 import PageHeader from "../components/PageHeader";
 import LLMConfigCard, { LLMPreset, LLMConfigState } from "../components/LLMConfigCard";
-import { Settings as SettingsApi, AppSettings, Admin, ImportResult, InvestmentBudgetItem, AssetType } from "../api/client";
+import { Settings as SettingsApi, AppSettings, Admin, ImportResult, InvestmentBudgetItem, AssetType, UpdateApi } from "../api/client";
+
 
 const PRESETS: Record<string, string> = {
   hourly: "每小时",
@@ -457,10 +460,14 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {/* ============ 在线更新 ============ */}
+        <UpdateCard />
+
         {/* ============ 数据备份 ============ */}
         <BackupCard />
 
         {/* ============ 危险区：清除所有数据 ============ */}
+
         <DangerZoneCard />
       </div>
     </>
@@ -837,7 +844,117 @@ function VisionAdvanced({
 }
 
 // ============================================================
+// UpdateCard：Docker 在线更新
+// ============================================================
+function UpdateCard() {
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
+    queryKey: ["update-status"],
+    queryFn: UpdateApi.status,
+    retry: false,
+  });
+
+  const trigger = useMutation({
+    mutationFn: () => UpdateApi.trigger(data?.confirm_text || "UPDATE_NOW"),
+    onSuccess: (r) => {
+      toast.success(r.message, { duration: 9000 });
+      setTimeout(() => refetch(), 8000);
+    },
+    onError: (e: any) => toast.error(e?.message || "触发更新失败"),
+  });
+
+  const updateBadge = data?.update_available === true
+    ? "border-emerald2/40 bg-emerald2/10 text-emerald2"
+    : data?.update_available === false
+      ? "border-accent/40 bg-accent/10 text-accent-soft"
+      : "border-amber2/40 bg-amber2/10 text-amber2";
+
+  const startUpdate = () => {
+    if (!data?.web_update_enabled) return;
+    const ok = window.confirm(
+      "将通过 Watchtower 拉取最新 Docker 镜像并重启当前容器。更新过程中页面会短暂断开，确认继续？",
+    );
+    if (ok) trigger.mutate();
+  };
+
+  return (
+    <div className="card p-5 lg:col-span-2">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+        <div>
+          <h3 className="font-semibold mb-1 flex items-center gap-2">
+            <Rocket className="w-4 h-4 text-accent" /> 在线更新
+          </h3>
+          <p className="text-xs text-muted leading-relaxed">
+            支持两条路径：绿联 Docker GUI 直接拉取 Docker Hub 镜像，或在本页通过 Watchtower HTTP API 一键更新并重启容器。
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button className="btn !px-3 !py-1.5 text-xs" onClick={() => refetch()} disabled={isFetching} type="button">
+            <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? "animate-spin" : ""}`} /> 刷新状态
+          </button>
+          <button
+            className="btn-primary !px-3 !py-1.5 text-xs"
+            onClick={startUpdate}
+            disabled={!data?.web_update_enabled || trigger.isPending}
+            type="button"
+            title={!data?.web_update_enabled ? "需启用 UPDATE_ENABLE_WEB_TRIGGER 并配置 Watchtower Token" : undefined}
+          >
+            {trigger.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+            立即更新
+          </button>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="text-sm text-muted">正在读取更新状态…</div>
+      ) : error ? (
+        <div className="rounded-xl border border-rose2/30 bg-rose2/10 p-3 text-sm text-rose2">
+          更新状态读取失败：{(error as any)?.message || String(error)}
+        </div>
+      ) : data ? (
+        <div className="space-y-4">
+          <div className="grid md:grid-cols-3 gap-3">
+            <div className="rounded-xl border border-line bg-bg-soft/30 p-3">
+              <div className="text-[11px] text-muted mb-1">当前版本</div>
+              <div className="font-mono text-sm text-white/90 break-all">{data.current_version || "local"}</div>
+              <div className="text-[11px] text-muted mt-1 break-all">{data.current_revision || "无提交信息"}</div>
+            </div>
+            <div className="rounded-xl border border-line bg-bg-soft/30 p-3">
+              <div className="text-[11px] text-muted mb-1">Docker Hub 最新</div>
+              <div className="font-mono text-sm text-white/90 break-all">{data.latest_version || "未获取"}</div>
+              <div className="text-[11px] text-muted mt-1 break-all">{data.checked_repo || data.dockerhub_repo || "未配置仓库"}</div>
+            </div>
+            <div className="rounded-xl border border-line bg-bg-soft/30 p-3">
+              <div className="text-[11px] text-muted mb-2">更新状态</div>
+              <span className={`badge ${updateBadge}`}>
+                {data.update_available === true ? "发现新版本" : data.update_available === false ? "已是最新" : "需人工确认"}
+              </span>
+              <div className="text-[11px] text-muted mt-2">网页更新：{data.web_update_enabled ? "已启用" : "未启用"}</div>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-line bg-bg-soft/30 p-3 text-xs leading-relaxed text-muted">
+            <div className="text-white/85 mb-1">{data.message}</div>
+            {data.check_error && <div className="text-amber2 break-all">Docker Hub 检查错误：{data.check_error}</div>}
+            <div className="mt-2 grid md:grid-cols-2 gap-2">
+              <div>镜像：<code className="text-white/80 break-all">{data.image || "未配置 UPDATE_IMAGE"}</code></div>
+              <div>Watchtower：<code className="text-white/80 break-all">{data.watchtower_configured ? data.watchtower_url : "未配置 Token"}</code></div>
+            </div>
+          </div>
+
+          {!data.web_update_enabled && (
+            <div className="rounded-xl border border-amber2/30 bg-amber2/10 p-3 text-xs leading-relaxed text-amber2">
+              如需网页点击更新：在 `.env` 中设置 `UPDATE_ENABLE_WEB_TRIGGER=true`、`UPDATE_WATCHTOWER_TOKEN=长随机字符串`，并用 `docker compose --profile update up -d` 启动 Watchtower。
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// ============================================================
 // BackupCard：资产数据备份 / 恢复
+
 // ------------------------------------------------------------
 // 设计动机：
 //   - 用户换电脑/重装系统前想带走自己录入的基金股票；以后随时能还原

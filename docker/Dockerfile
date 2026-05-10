@@ -8,13 +8,24 @@ RUN npm run build
 
 # ---------- Stage 2: backend runtime ----------
 FROM python:3.11-slim AS runtime
+ARG APP_VERSION=local
+ARG VCS_REF=local
+ARG BUILD_DATE=unknown
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     TZ=Asia/Shanghai \
     DATA_DIR=/app/data \
     SKILLS_DIR=/app/skills_installed \
-    STATIC_DIR=/app/static
+    STATIC_DIR=/app/static \
+    APP_VERSION=${APP_VERSION} \
+    VCS_REF=${VCS_REF} \
+    BUILD_DATE=${BUILD_DATE}
+LABEL org.opencontainers.image.title="EE AI Fund Management" \
+      org.opencontainers.image.version=${APP_VERSION} \
+      org.opencontainers.image.revision=${VCS_REF} \
+      org.opencontainers.image.created=${BUILD_DATE}
+
 
 WORKDIR /app
 

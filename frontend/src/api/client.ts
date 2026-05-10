@@ -468,7 +468,41 @@ export const Settings = {
     }).then((r) => r.data),
 };
 
+export interface UpdateStatus {
+  current_version: string;
+  current_revision: string;
+  build_date: string;
+  image: string;
+  dockerhub_repo: string;
+  latest_version?: string;
+  latest_updated_at?: string;
+  latest_digest?: string;
+  source?: string;
+  checked_repo?: string;
+  update_available: boolean | null;
+  check_error: string;
+  message: string;
+  watchtower_url: string;
+  watchtower_configured: boolean;
+  web_update_enabled: boolean;
+  confirm_text: string;
+}
+
+export interface TriggerUpdateResult {
+  ok: boolean;
+  status_code: number;
+  message: string;
+  watchtower_response?: string;
+}
+
+export const UpdateApi = {
+  status: () => api.get<UpdateStatus>("/update/status", { timeout: 15_000 }).then((r) => r.data),
+  trigger: (confirm: string) =>
+    api.post<TriggerUpdateResult>("/update/trigger", { confirm }, { timeout: 180_000 }).then((r) => r.data),
+};
+
 export const Skills = {
+
   installed: () => api.get<Skill[]>("/skills/installed").then((r) => r.data),
   marketplace: (q = "") =>
     api.get<{ items: MarketSkill[] }>("/skills/marketplace", { params: { q } }).then((r) => r.data.items),

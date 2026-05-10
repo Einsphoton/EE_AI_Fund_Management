@@ -12,8 +12,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -23,6 +27,18 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Prepare build vars
+        id: vars
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "app_version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_version=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "vcs_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -30,11 +46,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/ee-fund-management
+          images: |
+            name=ghcr.io/${{ github.repository_owner }}/ee-fund-management
+            name=docker.io/${{ env.DOCKERHUB_USERNAME }}/ee-fund-management,enable=${{ env.DOCKERHUB_USERNAME != '' }}
+
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -45,11 +72,15 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          # 绿联 NAS 多数是 x86_64；如果你是 ARM（比如 DXP 的 ARM 型号），把下行改成
+          # 绿联 NAS 多数是 x86_64；如果你是 ARM（比如 DXP 的 ARM 型号），改成：
           # platforms: linux/amd64,linux/arm64
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.vars.outputs.app_version }}
+            VCS_REF=${{ steps.vars.outputs.vcs_ref }}
+            BUILD_DATE=${{ steps.vars.outputs.build_date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

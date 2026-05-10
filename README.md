@@ -116,6 +116,8 @@ EE_AI_Fund_Management/
 
 ## 🚀 一键部署到 NAS
 
+### 方式 A：源码构建（适合开发 / 自用调试）
+
 ```bash
 git clone <repo>
 cd EE_AI_Fund_Management
@@ -130,7 +132,56 @@ docker compose up -d
 
 打开 `http://<nas-ip>:8888` 即可访问。数据库文件、Skill 安装目录都在 `./data` 和 `./skills_installed`，升级时不会丢。
 
+### 方式 B：Docker Hub 镜像（推荐给绿联 NAS GUI）
+
+绿联 NAS 的 Docker GUI 如果默认只认 `hub.docker.com`，建议把 GitHub Actions 发布到 Docker Hub：
+
+1. 在 Docker Hub 创建仓库：`<your-dockerhub-username>/ee-fund-management`
+2. 在 GitHub 仓库 `Settings → Secrets and variables → Actions` 添加：
+   - `DOCKERHUB_USERNAME`
+   - `DOCKERHUB_TOKEN`（Docker Hub Access Token）
+3. 推送到 `main` 或打 tag（如 `v1.0.0`），Actions 会发布：
+   - `docker.io/<your-dockerhub-username>/ee-fund-management:latest`
+   - `docker.io/<your-dockerhub-username>/ee-fund-management:<version>`
+
+绿联 Docker GUI 中创建容器时：
+
+| 配置项 | 值 |
+| --- | --- |
+| 镜像 | `docker.io/<your-dockerhub-username>/ee-fund-management:latest` |
+| 端口 | `8888:8000` |
+| 数据目录 | `/你的NAS路径/data:/app/data` |
+| Skill 目录 | `/你的NAS路径/skills_installed:/app/skills_installed` |
+| 环境变量 | `TZ=Asia/Shanghai`，可选填 `CF_ACCESS_*` |
+
+以后在绿联 GUI 里点「更新/拉取最新镜像」并重建容器即可，数据会保留在映射目录里。
+
+> 如果你的绿联 Docker 支持新增镜像仓库，也可以把 `ghcr.io` 加进去后使用 GitHub Container Registry；但为了兼容 GUI，默认推荐 Docker Hub。
+
+### 方式 C：网页内点击更新（Watchtower）
+
+如果希望在本 APP 的「设置 → 在线更新」里点按钮完成更新，使用 Docker Hub 镜像启动，并在 `.env` 中配置：
+
+```bash
+EE_FUND_IMAGE=docker.io/<your-dockerhub-username>/ee-fund-management:latest
+UPDATE_DOCKERHUB_REPO=<your-dockerhub-username>/ee-fund-management
+UPDATE_ENABLE_WEB_TRIGGER=true
+UPDATE_WATCHTOWER_TOKEN=<生成一个足够长的随机字符串>
+```
+
+然后启动主容器和 Watchtower：
+
+```bash
+docker compose --profile update up -d
+```
+
+说明：
+- 「在线更新」会先查询 Docker Hub 最新 tag，再通过 Watchtower HTTP API 触发拉取镜像和重启容器。
+- Watchtower 需要挂载 Docker socket，只建议在可信内网使用；不要把更新接口暴露到公网。
+- 如果只想用绿联 Docker GUI 更新，可以不启用 `UPDATE_ENABLE_WEB_TRIGGER` 和 Watchtower。
+
 ---
+
 
 ## 🧪 本地调试
 

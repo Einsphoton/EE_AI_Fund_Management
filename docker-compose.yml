@@ -2,11 +2,20 @@ version: "3.9"
 
 services:
   ee-fund:
+    # NAS GUI 更新建议使用 Docker Hub 镜像，例如：
+    # EE_FUND_IMAGE=docker.io/<your-dockerhub-username>/ee-fund-management:latest
+    image: ${EE_FUND_IMAGE:-ee-fund-management:local}
     build:
       context: .
       dockerfile: docker/Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
+        VCS_REF: ${VCS_REF:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: ee-fund-management
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "8888:8000"
     environment:
@@ -17,6 +26,13 @@ services:
       - CF_ACCESS_CLIENT_ID=${CF_ACCESS_CLIENT_ID:-}
       - CF_ACCESS_CLIENT_SECRET=${CF_ACCESS_CLIENT_SECRET:-}
       - CF_ACCESS_HOSTS=${CF_ACCESS_HOSTS:-einsphoton.ren}
+      # 在线更新：检查 Docker Hub / 通过 Watchtower HTTP API 触发更新
+      - UPDATE_IMAGE=${EE_FUND_IMAGE:-}
+
+      - UPDATE_DOCKERHUB_REPO=${UPDATE_DOCKERHUB_REPO:-}
+      - UPDATE_ENABLE_WEB_TRIGGER=${UPDATE_ENABLE_WEB_TRIGGER:-false}
+      - UPDATE_WATCHTOWER_URL=${UPDATE_WATCHTOWER_URL:-http://ee-fund-watchtower:8080/v1/update}
+      - UPDATE_WATCHTOWER_TOKEN=${UPDATE_WATCHTOWER_TOKEN:-}
     volumes:
       - ./data:/app/data
       - ./skills_installed:/app/skills_installed
@@ -25,3 +41,20 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  ee-fund-watchtower:
+    image: containrrr/watchtower:latest
+    container_name: ee-fund-watchtower
+    restart: unless-stopped
+    profiles: ["update"]
+    environment:
+      - TZ=Asia/Shanghai
+      - WATCHTOWER_HTTP_API_TOKEN=${UPDATE_WATCHTOWER_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - --http-api-update
+      - --label-enable
+      - --cleanup
+      - --rolling-restart
+
