@@ -10,7 +10,9 @@ from .. import models, schemas
 from ..database import get_db
 from ..services import quotes as quotes_service
 from ..services import holdings as holding_service
+from ..services import settings_service
 from ..services.target_recommender import TargetRecommendationError, recommend_ai_targets
+
 from ..tz import now_local
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -297,12 +299,15 @@ async def list_holdings(db: Session = Depends(get_db)):
     import asyncio
 
     assets = db.query(models.Asset).all()
+    quote_sources = settings_service.get(db, "quote_sources") or {}
 
     async def _safe_price(a: models.Asset) -> float | None:
         try:
             return await quotes_service.fetch_current_price_cached(
                 a.asset_type.value, a.market.value, a.code,
+                quote_sources=quote_sources,
             )
+
         except Exception:
             return None
 

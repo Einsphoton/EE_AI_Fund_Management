@@ -83,12 +83,15 @@ def _extract_focus_codes(user_msg: str, all_codes: list[str], all_names: list[st
 async def _collect_portfolio_rows(db: Session) -> tuple[list[dict[str, Any]], list[models.Asset]]:
     assets: Iterable[models.Asset] = db.query(models.Asset).all()
     assets_list = list(assets)
+    quote_sources = settings_service.get(db, "quote_sources") or {}
 
     async def _safe_price(a: models.Asset) -> float | None:
         try:
             return await quotes_service.fetch_current_price_cached(
                 a.asset_type.value, a.market.value, a.code,
+                quote_sources=quote_sources,
             )
+
         except Exception:
             return None
 

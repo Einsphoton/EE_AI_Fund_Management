@@ -370,8 +370,17 @@ export interface AppSettings {
 
   schedule: { enabled: boolean; cron: string; preset: string; include_investment_plan?: boolean; include_ai_targets?: boolean };
   investment_budget?: { items: InvestmentBudgetItem[] };
+  quote_sources?: {
+    fund_current?: "eastmoney_realtime" | "eastmoney_nav" | string;
+    stock_current?: "tencent_realtime" | "kline_close" | string;
+    a_stock_kline?: "sina" | "tencent" | string;
+    hk_stock_kline?: "tencent" | string;
+    us_stock_kline?: "tencent" | "yahoo" | string;
+    fallback_enabled?: boolean;
+  };
   ui: { currency: string; theme: string };
 }
+
 
 export interface ProfileOption {
   id: string;

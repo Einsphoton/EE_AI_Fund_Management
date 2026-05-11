@@ -8,6 +8,8 @@ from .. import models
 from ..database import get_db
 from ..services import quotes as quotes_service
 from ..services import snapshot as snapshot_service
+from ..services import settings_service
+
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
 
@@ -21,9 +23,12 @@ async def asset_quote(
     asset = db.get(models.Asset, asset_id)
     if not asset:
         raise HTTPException(404, "asset not found")
+    quote_sources = settings_service.get(db, "quote_sources") or {}
     quote = await quotes_service.fetch_quote(
         asset.asset_type.value, asset.market.value, asset.code, days=days,
+        quote_sources=quote_sources,
     )
+
     txns = [
         {
             "id": t.id,
@@ -46,7 +51,11 @@ async def asset_quote(
         "current_price": quote.get("current_price"),
         "transactions": txns,
         "error": quote.get("error"),
+        "source": quote.get("source"),
+        "quote_sources": quote_sources,
     }
+
+
 
 
 @router.get("/asset/{asset_id}/snapshot")
@@ -67,12 +76,19 @@ async def raw_quote(
     asset_type: str = "stock",
     market: str = "A",
     days: int = Query(180, ge=7, le=4000),
+    db: Session = Depends(get_db),
 ):
     """无需创建标的也可以预览行情，便于前端在添加时校验代码。"""
-    quote = await quotes_service.fetch_quote(asset_type, market, code, days=days)
+    quote_sources = settings_service.get(db, "quote_sources") or {}
+    quote = await quotes_service.fetch_quote(asset_type, market, code, days=days, quote_sources=quote_sources)
+
     return {
         "code": code, "asset_type": asset_type, "market": market,
         "points": quote.get("points") or [],
         "current_price": quote.get("current_price"),
         "error": quote.get("error"),
+        "source": quote.get("source"),
+        "quote_sources": quote_sources,
     }
+
+

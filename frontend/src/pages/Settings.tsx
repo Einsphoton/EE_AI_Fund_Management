@@ -4,8 +4,9 @@ import {
   Save, Camera, Check, User, BookOpen, Zap,
   AlertTriangle, Trash2, Loader2, X,
   Download, Upload, Database, FileJson, FileSpreadsheet, Plus,
-  RefreshCw, Rocket, ShieldCheck,
+  RefreshCw, Rocket, ShieldCheck, LineChart,
 } from "lucide-react";
+
 
 import toast from "react-hot-toast";
 
@@ -134,7 +135,16 @@ export default function SettingsPage() {
 
   });
   const [schedule, setSchedule] = useState<AppSettings["schedule"]>({ enabled: false, cron: "0 9 * * *", preset: "daily", include_investment_plan: false, include_ai_targets: false });
+  const [quoteSources, setQuoteSources] = useState<NonNullable<AppSettings["quote_sources"]>>({
+    fund_current: "eastmoney_realtime",
+    stock_current: "tencent_realtime",
+    a_stock_kline: "sina",
+    hk_stock_kline: "tencent",
+    us_stock_kline: "tencent",
+    fallback_enabled: true,
+  });
   const [budgetItems, setBudgetItems] = useState<InvestmentBudgetItem[]>([]);
+
 
   useEffect(() => {
     if (!data) return;
@@ -179,15 +189,26 @@ export default function SettingsPage() {
 
     }
     setSchedule(data.schedule);
+    setQuoteSources({
+      fund_current: data.quote_sources?.fund_current ?? "eastmoney_realtime",
+      stock_current: data.quote_sources?.stock_current ?? "tencent_realtime",
+      a_stock_kline: data.quote_sources?.a_stock_kline ?? "sina",
+      hk_stock_kline: data.quote_sources?.hk_stock_kline ?? "tencent",
+      us_stock_kline: data.quote_sources?.us_stock_kline ?? "tencent",
+      fallback_enabled: data.quote_sources?.fallback_enabled ?? true,
+    });
     setBudgetItems(data.investment_budget?.items ?? []);
   }, [data]);
+
 
   const save = useMutation({
     mutationFn: async () => {
       await SettingsApi.put("ai", ai);
       await SettingsApi.put("schedule", schedule);
       await SettingsApi.put("vision", vision);
+      await SettingsApi.put("quote_sources", quoteSources);
       await SettingsApi.put("investment_budget", { items: budgetItems });
+
     },
     onSuccess: () => {
       toast.success("配置已保存并生效");
@@ -394,7 +415,11 @@ export default function SettingsPage() {
         {/* ============ 平台月投资额度 ============ */}
         <BudgetSettingsCard items={budgetItems} onChange={setBudgetItems} />
 
+        {/* ============ 基金股票数据源 ============ */}
+        <QuoteSourceCard value={quoteSources} onChange={setQuoteSources} />
+
         {/* ============ 投资者性格 ============ */}
+
         <div className="card p-5 lg:col-span-2">
           <h3 className="font-semibold mb-1 flex items-center gap-2">
             <User className="w-4 h-4 text-accent" /> 投资者性格
@@ -572,10 +597,82 @@ function CustomScheduleEditor({ cron, onChange }: {
   );
 }
 
+function QuoteSourceCard({ value, onChange }: {
+  value: NonNullable<AppSettings["quote_sources"]>;
+  onChange: (value: NonNullable<AppSettings["quote_sources"]>) => void;
+}) {
+  const set = (patch: Partial<NonNullable<AppSettings["quote_sources"]>>) => onChange({ ...value, ...patch });
+  return (
+    <div className="card p-5 lg:col-span-2">
+      <h3 className="font-semibold mb-1 flex items-center gap-2">
+        <LineChart className="w-4 h-4 text-accent" /> 基金 / 股票数据源
+      </h3>
+      <p className="text-xs text-muted mb-4 leading-relaxed">
+        价格与平台略有差异通常来自口径：基金可用「实时估值」或「官方最新净值」；股票/ETF 可用腾讯当前价或 K 线最后收盘价。部分公开源有延迟，建议选择与你常用平台口径最接近的数据源。
+      </p>
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div>
+          <label className="label">场外基金当前价</label>
+          <select className="input" value={value.fund_current || "eastmoney_realtime"} onChange={(e) => set({ fund_current: e.target.value })}>
+            <option value="eastmoney_realtime">天天基金实时估值</option>
+            <option value="eastmoney_nav">天天基金官方最新净值</option>
+          </select>
+          <div className="text-[10px] text-muted mt-1">实时估值盘中会变；官方净值通常晚间更新，更接近基金公司口径。</div>
+        </div>
+        <div>
+          <label className="label">股票 / ETF 当前价</label>
+          <select className="input" value={value.stock_current || "tencent_realtime"} onChange={(e) => set({ stock_current: e.target.value })}>
+            <option value="tencent_realtime">腾讯实时/延迟行情</option>
+            <option value="eastmoney_realtime">东方财富实时/延迟行情</option>
+            <option value="sina_realtime">新浪实时/延迟行情（A 股）</option>
+            <option value="kline_close">K 线最后收盘价</option>
+
+          </select>
+          <div className="text-[10px] text-muted mt-1">若与券商实时价有小差异，通常是延迟、复权或收盘价口径不同。</div>
+        </div>
+        <div>
+          <label className="label">A 股 / 场内基金 K 线</label>
+          <select className="input" value={value.a_stock_kline || "sina"} onChange={(e) => set({ a_stock_kline: e.target.value })}>
+            <option value="sina">新浪财经</option>
+            <option value="tencent">腾讯财经</option>
+            <option value="eastmoney">东方财富</option>
+
+          </select>
+        </div>
+        <div>
+          <label className="label">港股 K 线</label>
+          <select className="input" value={value.hk_stock_kline || "tencent"} onChange={(e) => set({ hk_stock_kline: e.target.value })}>
+            <option value="tencent">腾讯财经</option>
+            <option value="eastmoney">东方财富</option>
+          </select>
+        </div>
+        <div>
+          <label className="label">美股 K 线</label>
+
+          <select className="input" value={value.us_stock_kline || "tencent"} onChange={(e) => set({ us_stock_kline: e.target.value })}>
+            <option value="tencent">腾讯财经（国内网络友好）</option>
+            <option value="yahoo">Yahoo Finance</option>
+          </select>
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer text-sm pt-7 select-none">
+          <input
+            type="checkbox"
+            className="accent-accent w-4 h-4"
+            checked={value.fallback_enabled !== false}
+            onChange={(e) => set({ fallback_enabled: e.target.checked })}
+          />
+          主源失败时自动回退
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function BudgetSettingsCard({ items, onChange }: {
   items: InvestmentBudgetItem[];
   onChange: (items: InvestmentBudgetItem[]) => void;
 }) {
+
   const add = () => onChange([...items, { platform: "", currency: "CNY", monthly_amount: 1000, asset_types: ["fund"] }]);
   const update = (idx: number, patch: Partial<InvestmentBudgetItem>) => {
     onChange(items.map((it, i) => i === idx ? { ...it, ...patch } : it));

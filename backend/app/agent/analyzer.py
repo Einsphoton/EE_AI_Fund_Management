@@ -59,9 +59,12 @@ async def _analyze_one_core(
     on_log : 可选回调（同步或 awaitable），用于把"限速等待"等事件实时报给上层
              （流式 API 会把它接到 SSE 队列）。批量调度场景可不传。
     """
+    quote_sources = settings_service.get(db, "quote_sources") or {}
     quote = await quotes_service.fetch_quote(
         asset.asset_type.value, asset.market.value, asset.code, days=180,
+        quote_sources=quote_sources,
     )
+
     points = quote.get("points") or []
     current = quote.get("current_price")
     holding = holding_service.summarize(asset, current)
