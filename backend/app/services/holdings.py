@@ -93,8 +93,64 @@ def _empty_summary() -> dict:
     }
 
 
+def realized_pnl_events(asset: models.Asset) -> list[dict]:
+    """按卖出交易拆出已实现盈亏明细，口径与 summarize() 完全一致。"""
+    total_shares = 0.0
+    cost_basis = 0.0
+    events: list[dict] = []
+
+    txns = sorted(
+        asset.transactions,
+        key=lambda t: (t.trade_date or asset.created_at, t.id or 0),
+    )
+    for t in txns:
+        shares = t.shares or 0.0
+        price = t.price or 0.0
+        amount = t.amount or 0.0
+        if price <= 0 and shares > 0 and amount > 0:
+            price = amount / shares
+
+        if t.txn_type == models.TxnType.buy:
+            if shares > 0:
+                cost_basis += shares * price
+                total_shares += shares
+            continue
+
+        sell_shares = min(shares, total_shares) if total_shares > 0 else shares
+        if total_shares <= 0 or sell_shares <= 0:
+            continue
+
+        avg = cost_basis / total_shares
+        realized = (price - avg) * sell_shares - (t.fee or 0.0)
+        cost_basis -= avg * sell_shares
+        total_shares -= sell_shares
+        sell_amount = (amount * sell_shares / shares) if amount > 0 and shares > 0 else (sell_shares * price)
+        events.append({
+
+            "transaction_id": t.id,
+            "asset_id": asset.id,
+            "asset_name": asset.name,
+            "asset_code": asset.code,
+            "asset_type": asset.asset_type.value,
+            "market": asset.market.value,
+            "platform": asset.platform or "",
+            "operation": "卖出",
+            "trade_date": t.trade_date,
+            "shares": round(sell_shares, 4),
+            "sell_price": round(price, 4),
+            "avg_cost": round(avg, 4),
+            "sell_amount": round(sell_amount, 2),
+            "fee": round(t.fee or 0.0, 2),
+            "realized_pnl": round(realized, 2),
+            "note": t.note or "",
+        })
+
+    return events
+
+
 def summarize(asset: models.Asset, current_price: float | None) -> dict:
     asset_type = (getattr(asset.asset_type, "value", asset.asset_type) or "").lower()
+
 
     # 货基/理财/现金/债券：无 transactions 时直接用 principal_amount 估算
     if asset_type in _NO_TXN_TYPES and not asset.transactions and asset.principal_amount:

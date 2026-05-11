@@ -279,9 +279,14 @@ function Section({ title, icon, list, totals, onEdit, onAnalyze, onDelete, empty
               持仓应收 {fmtMoney(totals.holdingReceivable)}
               {totals.holdingPct !== null && <span className="ml-1">({fmtPct(totals.holdingPct)})</span>}
             </span>
-            <span className={totals.realizedReceivable >= 0 ? "text-emerald2" : "text-rose2"}>
-              已实现应收 {fmtMoney(totals.realizedReceivable)}
-            </span>
+            <Link
+              to="/realized-revenue"
+              className={`${totals.realizedReceivable >= 0 ? "text-emerald2" : "text-rose2"} hover:text-white transition`}
+              title="查看已实现营收明细"
+            >
+              已实现营收 {fmtMoney(totals.realizedReceivable)}
+            </Link>
+
           </div>
         )}
       </div>

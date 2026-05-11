@@ -131,7 +131,20 @@ async def lookup_code(
     return {"ok": False, "suggestion": None, "reason": "no candidate found"}
 
 
+@router.get("/realized-pnl", response_model=schemas.RealizedPnlResponse)
+def list_realized_pnl(db: Session = Depends(get_db)):
+    """列出所有由卖出操作产生的已实现营收 / 盈亏明细。"""
+    assets = db.query(models.Asset).all()
+    items: list[dict] = []
+    for asset in assets:
+        items.extend(holding_service.realized_pnl_events(asset))
+    items.sort(key=lambda x: (x.get("trade_date") or now_local()), reverse=True)
+    total = round(sum(float(x.get("realized_pnl") or 0.0) for x in items), 2)
+    return {"total": total, "count": len(items), "items": items}
+
+
 @router.get("/{asset_id}", response_model=schemas.AssetOut)
+
 def get_asset(asset_id: int, db: Session = Depends(get_db)):
     asset = db.get(models.Asset, asset_id)
     if not asset:

@@ -12,7 +12,9 @@ import AIChat from "./pages/AIChat";
 import ImportOcr from "./pages/ImportOcr";
 import Todos from "./pages/Todos";
 import Targets from "./pages/Targets";
+import RealizedRevenue from "./pages/RealizedRevenue";
 import { AnalysisTaskProvider } from "./lib/analysisTask";
+
 import { OcrTaskProvider } from "./lib/ocrTask";
 import AnalysisTaskIndicator from "./components/AnalysisTaskIndicator";
 import OcrTaskIndicator from "./components/OcrTaskIndicator";
@@ -75,7 +77,9 @@ export default function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/assets" element={<Assets />} />
               <Route path="/targets" element={<Targets />} />
+              <Route path="/realized-revenue" element={<RealizedRevenue />} />
               <Route path="/assets/:id" element={<AssetDetail />} />
+
               <Route path="/import" element={<ImportOcr />} />
               <Route path="/chat" element={<AIChat />} />
               <Route path="/advice" element={<Advice />} />

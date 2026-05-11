@@ -186,7 +186,35 @@ class HoldingSummary(BaseModel):
     total_shares: float
     total_cost: float
     avg_cost: float
+    total_fee: float = 0.0
+    realized_pnl: float = 0.0
     current_price: float | None
     market_value: float | None
     profit: float | None
     profit_pct: float | None
+
+
+class RealizedPnlItem(BaseModel):
+    transaction_id: int
+    asset_id: int
+    asset_name: str
+    asset_code: str
+    asset_type: str
+    market: str
+    platform: str = ""
+    operation: str = "卖出"
+    trade_date: datetime | None = None
+    shares: float
+    sell_price: float
+    avg_cost: float
+    sell_amount: float
+    fee: float
+    realized_pnl: float
+    note: str = ""
+
+
+class RealizedPnlResponse(BaseModel):
+    total: float
+    count: int
+    items: list[RealizedPnlItem]
+

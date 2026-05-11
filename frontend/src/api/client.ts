@@ -117,7 +117,33 @@ export interface Holding {
   profit_pct: number | null;
 }
 
+export interface RealizedPnlItem {
+  transaction_id: number;
+  asset_id: number;
+  asset_name: string;
+  asset_code: string;
+  asset_type: AssetType;
+  market: Market;
+  platform: string;
+  operation: string;
+  trade_date: string | null;
+  shares: number;
+  sell_price: number;
+  avg_cost: number;
+  sell_amount: number;
+  fee: number;
+  realized_pnl: number;
+  note: string;
+}
+
+export interface RealizedPnlResponse {
+  total: number;
+  count: number;
+  items: RealizedPnlItem[];
+}
+
 export interface Snapshot {
+
   symbol?: string;
   name?: string;
   last?: number | null;
@@ -371,8 +397,10 @@ export const Assets = {
     api.patch<Transaction>(`/assets/${id}/transactions/${txnId}`, p).then((r) => r.data),
   removeTxn: (id: number, txnId: number) => api.delete(`/assets/${id}/transactions/${txnId}`).then((r) => r.data),
   holdings: () => api.get<Holding[]>("/assets/summary/all").then((r) => r.data),
+  realizedPnl: () => api.get<RealizedPnlResponse>("/assets/realized-pnl").then((r) => r.data),
   /**
    * 智能补全资产缺失字段（首要用途：补 fund/etf 类代码）。
+
    * 先打天天基金 API，没结果再让 LLM 兜底。
    * apply=false 仅返回建议、不改库；用户确认后再调一次 apply=true。
    */

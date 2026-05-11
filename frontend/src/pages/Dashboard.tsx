@@ -75,11 +75,17 @@ export default function Dashboard() {
             ) : null
           }
         />
-        <StatCard
-          label="已实现应收"
-          value={fmtMoney(realizedReceivable)}
-          tone={realizedReceivable >= 0 ? "success" : "danger"}
-        />
+        <Link to="/realized-revenue" className="block group rounded-2xl focus:outline-none focus:ring-2 focus:ring-accent/50">
+          <div className="transition group-hover:-translate-y-0.5 group-hover:shadow-glow">
+            <StatCard
+              label="已实现营收"
+              value={fmtMoney(realizedReceivable)}
+              tone={realizedReceivable >= 0 ? "success" : "danger"}
+              hint="点击查看每次卖出明细"
+            />
+          </div>
+        </Link>
+
         <StatCard
           label="最新 AI 分析"
           value={
