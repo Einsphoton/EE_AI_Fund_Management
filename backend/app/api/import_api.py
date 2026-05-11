@@ -313,8 +313,16 @@ async def stream_ocr_job(job_id: str):
                     if now - last_beat > 14:
                         yield ": ping\n\n"
                         last_beat = now
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    # 不让 SSE generator 异常把 chunked 响应直接打断成 500。
+                    yield f"data: {json.dumps({'type': 'fatal', 'error': str(e)}, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
         finally:
             ocr_jobs.manager.unsubscribe(job, queue)
+
 
     return StreamingResponse(
         gen(),

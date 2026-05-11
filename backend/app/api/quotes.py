@@ -60,14 +60,27 @@ async def asset_quote(
 
 @router.get("/asset/{asset_id}/snapshot")
 async def asset_snapshot(asset_id: int, db: Session = Depends(get_db)):
-    """基本盘 / 关键指标。仅股票 / 港股 / 美股 / 场内 ETF 有效。"""
+    """基本盘 / 关键指标。仅股票 / 港股 / 美股 / 场内 ETF 有效。
+
+    公开行情源偶发返回异常/空响应时，不能让详情页因为基本盘面板 500。
+    这里降级为空对象，并把错误信息带回前端排查。
+    """
     asset = db.get(models.Asset, asset_id)
     if not asset:
         raise HTTPException(404, "asset not found")
-    snap = await snapshot_service.fetch_snapshot(
-        asset.asset_type.value, asset.market.value, asset.code,
-    )
-    return snap or {}
+    try:
+        snap = await snapshot_service.fetch_snapshot(
+            asset.asset_type.value, asset.market.value, asset.code,
+        )
+        return snap or {}
+    except Exception as e:
+        return {
+            "error": f"snapshot fetch failed: {type(e).__name__}: {str(e)[:200]}",
+            "symbol": asset.code,
+            "name": asset.name,
+            "market": asset.market.value,
+        }
+
 
 
 @router.get("/raw")

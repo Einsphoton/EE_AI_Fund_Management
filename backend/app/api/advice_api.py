@@ -1,8 +1,10 @@
 """AI advice API."""
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import List
+
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -73,10 +75,15 @@ async def run_for_all_stream():
         try:
             async for evt in analyze_all_stream():
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        except asyncio.CancelledError:
+            return
         except Exception as e:  # pragma: no cover
             yield f"data: {json.dumps({'type': 'fatal', 'error': str(e)}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(_gen(), media_type="text/event-stream", headers={
+
         # 禁用 Nginx/Cloudflare 缓冲，保证前端能实时拿到
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",

@@ -561,22 +561,24 @@ async def fetch_current_price(
         quote = await fetch_quote(asset_type, market, code, days=10, quote_sources=qs)
         return quote.get("current_price")
     current_source = str(qs.get("stock_current") or "tencent_realtime")
-    providers = [current_source]
-    if bool(qs.get("fallback_enabled", True)):
-        providers += [p for p in ("tencent_realtime", "eastmoney_realtime", "sina_realtime") if p not in providers]
-    for p in providers:
-        if p == "tencent_realtime":
-            v = await fetch_tencent_realtime(_realtime_symbol(market, code))
-        elif p == "eastmoney_realtime":
-            v = await fetch_eastmoney_realtime(market, code)
-        elif p == "sina_realtime":
-            v = await fetch_sina_realtime(market, code)
-        else:
-            v = None
-        if v is not None:
-            return v
+    if current_source != "kline_close":
+        providers = [current_source]
+        if bool(qs.get("fallback_enabled", True)):
+            providers += [p for p in ("tencent_realtime", "eastmoney_realtime", "sina_realtime") if p not in providers]
+        for p in providers:
+            if p == "tencent_realtime":
+                v = await fetch_tencent_realtime(_realtime_symbol(market, code))
+            elif p == "eastmoney_realtime":
+                v = await fetch_eastmoney_realtime(market, code)
+            elif p == "sina_realtime":
+                v = await fetch_sina_realtime(market, code)
+            else:
+                v = None
+            if v is not None:
+                return v
     quote = await fetch_quote(asset_type, market, code, days=10, quote_sources=qs)
     return quote.get("current_price")
+
 
 
 
