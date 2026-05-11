@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Modal from "./Modal";
-import { Asset, AssetType, Market, Transaction } from "../api/client";
+import { Asset, AssetType, Market, Transaction, Assets } from "../api/client";
+
 import { ASSET_TYPE_META, metaOf, marketLabel } from "../lib/assetMeta";
 
 export interface AssetFormData {
@@ -60,11 +61,19 @@ const TYPE_ORDER: AssetType[] = (Object.keys(ASSET_TYPE_META) as AssetType[])
 export default function AssetForm({ open, onClose, onSubmit, initial, initialTxns, initialDraft, title, editing }: Props) {
   const [data, setData] = useState<AssetFormData>(empty);
   const [submitting, setSubmitting] = useState(false);
+  const [lookupStatus, setLookupStatus] = useState("");
+  const lastEditedRef = useRef<"name" | "code" | null>(null);
+  const lookupSeqRef = useRef(0);
+
 
   useEffect(() => {
     if (!open) return;
+    setLookupStatus("");
+    lastEditedRef.current = null;
+    lookupSeqRef.current += 1;
     if (initial) {
       const base = { ...empty, ...initial } as AssetFormData;
+
       // 日期字段 ISO -> yyyy-mm-dd
       if (base.start_date) base.start_date = base.start_date.slice(0, 10);
       if (base.maturity_date) base.maturity_date = base.maturity_date.slice(0, 10);
@@ -89,6 +98,56 @@ export default function AssetForm({ open, onClose, onSubmit, initial, initialTxn
   const set = <K extends keyof AssetFormData>(k: K, v: AssetFormData[K]) =>
     setData((d) => ({ ...d, [k]: v }));
 
+  const applyLookup = (s: any, sourceField: "name" | "code") => {
+    if (!s?.code && !s?.matched_name) return;
+    setData((prev) => {
+      const next: AssetFormData = { ...prev };
+      if (s.asset_type && ASSET_TYPE_META[s.asset_type as AssetType]) {
+        next.asset_type = s.asset_type as AssetType;
+      }
+      const nextMeta = metaOf(next.asset_type);
+      if (s.market && nextMeta.availableMarkets.includes(s.market as Market)) {
+        next.market = s.market as Market;
+      }
+      if (s.code && (sourceField === "name" || !next.code.trim())) {
+        next.code = String(s.code).trim();
+      }
+      if (s.matched_name && (sourceField === "code" || !next.name.trim())) {
+        next.name = String(s.matched_name).trim();
+      }
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (!open || editing || !meta.hasQuote) return;
+    const sourceField = lastEditedRef.current || (!data.code.trim() && data.name.trim() ? "name" : !data.name.trim() && data.code.trim() ? "code" : null);
+    if (!sourceField) return;
+    const query = (sourceField === "name" ? data.name : data.code).trim();
+    if (query.length < (sourceField === "name" ? 2 : 1)) return;
+
+    const seq = ++lookupSeqRef.current;
+    const timer = window.setTimeout(async () => {
+      setLookupStatus(sourceField === "name" ? "正在按名称查代码…" : "正在按代码查名称…");
+      try {
+        const r = await Assets.lookupCode(query, data.asset_type, false);
+        if (seq !== lookupSeqRef.current) return;
+        if (r.ok && r.suggestion) {
+          applyLookup(r.suggestion, sourceField);
+          const label = r.suggestion.matched_name || r.suggestion.code || "已补全";
+          setLookupStatus(`已自动补全：${label}`);
+        } else {
+          setLookupStatus("");
+        }
+      } catch {
+        if (seq === lookupSeqRef.current) setLookupStatus("");
+      }
+    }, 500);
+    return () => window.clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, editing, data.name, data.code, data.asset_type, meta.hasQuote]);
+
+
   const setEditTxn = (patch: Partial<NonNullable<AssetFormData["edit_first_txn"]>>) =>
     setData((d) => ({
       ...d,
@@ -98,12 +157,15 @@ export default function AssetForm({ open, onClose, onSubmit, initial, initialTxn
   /** 切换资产类型时：把 market 拉回该类型的默认值（如果当前 market 不在可选列表内） */
   const switchType = (t: AssetType) => {
     const m = ASSET_TYPE_META[t];
+    lookupSeqRef.current += 1;
+    setLookupStatus("");
     setData((d) => ({
       ...d,
       asset_type: t,
       market: m.availableMarkets.includes(d.market) ? d.market : m.defaultMarket,
     }));
   };
+
 
   const submit = async () => {
     if (!data.name.trim() || !data.code.trim()) return;
@@ -196,8 +258,9 @@ export default function AssetForm({ open, onClose, onSubmit, initial, initialTxn
           <div>
             <label className="label">名称 *</label>
             <input className="input" value={data.name}
-                   onChange={(e) => set("name", e.target.value)}
+                   onChange={(e) => { lastEditedRef.current = "name"; set("name", e.target.value); }}
                    placeholder={
+
                      meta.label === "场外基金" ? "如：兴全合宜"
                      : meta.label === "股票" ? "如：腾讯控股"
                      : meta.label === "ETF / 场内基金" ? "如：沪深300ETF"
@@ -210,8 +273,9 @@ export default function AssetForm({ open, onClose, onSubmit, initial, initialTxn
           <div>
             <label className="label">代码 / 编号 *</label>
             <input className="input" value={data.code}
-                   onChange={(e) => set("code", e.target.value.trim())}
+                   onChange={(e) => { lastEditedRef.current = "code"; set("code", e.target.value.trim()); }}
                    placeholder={
+
                      data.asset_type === "fund" ? "如 163406"
                      : data.asset_type === "stock" || data.asset_type === "etf"
                        ? (data.market === "US" ? "AAPL" : data.market === "HK" ? "00700" : "600519")
@@ -219,8 +283,13 @@ export default function AssetForm({ open, onClose, onSubmit, initial, initialTxn
                    } />
           </div>
 
+          {lookupStatus && isQuoteAsset && !editing && (
+            <div className="col-span-2 -mt-2 text-[11px] text-accent-soft">{lookupStatus}</div>
+          )}
+
           <div className="col-span-2">
             <label className="flex items-center gap-2 text-sm select-none cursor-pointer">
+
               <input type="checkbox" className="accent-accent w-4 h-4"
                      checked={data.watch_only}
                      onChange={(e) => set("watch_only", e.target.checked)} />

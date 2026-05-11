@@ -634,8 +634,83 @@ async def _enrich_fund_code(name: str) -> dict | None:
     }
 
 
+def _candidate_code_matches(query: str, candidate: dict) -> bool:
+    q = (query or "").strip().upper()
+    c = str(candidate.get("code") or "").strip().upper()
+    if not q or not c:
+        return False
+    if q == c:
+        return True
+    # 基金 / A 股 / 港股均可能有前导 0；用户手输时经常省略。
+    if q.isdigit() and c.isdigit():
+        if len(c) == 6:
+            return q.zfill(6) == c
+        if len(c) <= 5:
+            return q.zfill(5) == c.zfill(5)
+    return False
+
+
+def _suggestion_from_candidates(query: str, candidates: list[dict], default_asset_type: str) -> dict | None:
+    matched = [it for it in candidates if _candidate_code_matches(query, it)]
+    if not matched:
+        return None
+    source_weight = _STOCK_SOURCE_WEIGHT if default_asset_type == "stock" else _FUND_SOURCE_WEIGHT
+    matched.sort(key=lambda it: source_weight.get(it.get("source", ""), 0.7), reverse=True)
+    best = matched[0]
+    return {
+        "code": best.get("code"),
+        "matched_name": best.get("name") or best.get("matched_name") or "",
+        "score": 1.0,
+        "source": best.get("source", "unknown"),
+        "asset_type": best.get("asset_type", default_asset_type),
+        "market": best.get("market", "A" if default_asset_type == "stock" else "OTC"),
+        "exchange": best.get("exchange", "UNKNOWN" if default_asset_type == "stock" else "OTC"),
+        "alternates": [
+            {
+                "code": it.get("code"),
+                "name": it.get("name") or "",
+                "score": 1.0,
+                "source": it.get("source", "unknown"),
+                "asset_type": it.get("asset_type", default_asset_type),
+                "market": it.get("market", "A" if default_asset_type == "stock" else "OTC"),
+                "exchange": it.get("exchange", "UNKNOWN" if default_asset_type == "stock" else "OTC"),
+            }
+            for it in matched[:5]
+        ],
+    }
+
+
+async def lookup_by_code(code: str, asset_type: str = "fund") -> dict | None:
+    """代码 → 官方名称 / 市场 / 类型。用于手动录入时反向补全名称。"""
+    code = (code or "").strip()
+    if not code:
+        return None
+    asset_type = (asset_type or "fund").lower()
+    if asset_type == "stock":
+        sources = [_tencent_smartbox(code), _sina_suggest(code), _xueqiu_search(code)]
+        default_type = "stock"
+        allowed = {"stock"}
+    else:
+        sources = [_eastmoney_search_fund(code), _tencent_smartbox(code), _sina_suggest(code), _xueqiu_search(code)]
+        default_type = "fund"
+        allowed = {"fund", "etf"}
+    try:
+        gathered = await asyncio.wait_for(asyncio.gather(*sources, return_exceptions=True), timeout=4.0)
+    except asyncio.TimeoutError:
+        return None
+    candidates: list[dict] = []
+    for items in gathered:
+        if isinstance(items, Exception):
+            continue
+        for it in items or []:
+            if it.get("asset_type") in allowed and _candidate_code_matches(code, it):
+                candidates.append(it)
+    return _suggestion_from_candidates(code, candidates, default_type)
+
+
 async def _enrich_stock_code(name: str) -> dict | None:
     """名字 → 股票代码（**多源并行融合**）。
+
 
     A 股 / 港股 / 美股都能查；天天基金不参与股票评分。
     返回 shape 同 _enrich_fund_code。

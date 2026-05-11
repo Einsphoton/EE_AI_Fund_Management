@@ -46,7 +46,7 @@ async def enrich_fund_code(
     use_llm_fallback：所有数据源都没结果时是否让 LLM 兜底（默认 False，避免瞎编）。
     """
     from ..services.enrichment import (
-        _enrich_fund_code, _enrich_stock_code, _llm_guess_fund_code,
+        _enrich_fund_code, _enrich_stock_code, _llm_guess_fund_code, lookup_by_code,
     )
 
     if not name or not name.strip():
@@ -54,14 +54,21 @@ async def enrich_fund_code(
 
     name_clean = name.strip()
     asset_type_low = (asset_type or "fund").lower()
+    looks_like_code = bool(name_clean.replace(".", "").replace("-", "").isalnum()) and (
+        name_clean.isdigit()
+        or (asset_type_low == "stock" and len(name_clean) <= 10 and any(c.isalpha() for c in name_clean))
+    )
 
-    # 主源：按 asset_type 分流
-    if asset_type_low == "stock":
-        sug = await _enrich_stock_code(name_clean)
-    else:
-        # fund / etf / money_fund / bond / wealth 都走基金搜索
-        # （bond 也可能是场内债基；ETF 在天天基金里也存在）
-        sug = await _enrich_fund_code(name_clean)
+    # 主源：支持双向补全。输入像代码时先反查名称；否则按名称查代码。
+    sug = await lookup_by_code(name_clean, asset_type_low) if looks_like_code else None
+    if not sug:
+        if asset_type_low == "stock":
+            sug = await _enrich_stock_code(name_clean)
+        else:
+            # fund / etf / money_fund / bond / wealth 都走基金搜索
+            # （bond 也可能是场内债基；ETF 在天天基金里也存在）
+            sug = await _enrich_fund_code(name_clean)
+
     if sug:
         return {"ok": True, "suggestion": sug}
 
