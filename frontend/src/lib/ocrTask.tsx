@@ -100,8 +100,10 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<OcrTaskState>(defaultState);
   const abortRef = useRef<AbortController | null>(null);
   const seenEventsRef = useRef<Set<string>>(new Set());
+  const finalFetchedRef = useRef<Set<string>>(new Set());
 
   const patch = (u: (s: OcrTaskState) => OcrTaskState) => setState(u);
+
 
   /** 把后端事件落到 thoughts / progress / results 状态。 */
   const handleEvent = useCallback((evt: OcrJobEvent & { ts?: number }) => {
@@ -266,12 +268,18 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
 
   /** 任务结束后拉一次最终 result（含候选/建议）。 */
   const fetchFinalResult = useCallback(async (jobId: string) => {
+    if (finalFetchedRef.current.has(jobId)) return;
     try {
       const r = await ImportApi.getJob(jobId);
       const snap: OcrJobSnapshot = r.snapshot;
+      const terminal = snap.status === "done" || snap.status === "cancelled" || snap.status === "error";
+      if (!terminal) return;
+      finalFetchedRef.current.add(jobId);
+      abortRef.current?.abort();
       if ((snap.status === "done" || snap.status === "cancelled") && r.result) {
         // 过滤掉"已取消"的占位 result（platform === "已取消"），用户只看真正识别成功的
         const usableResults = r.result.results.filter((x) => x.platform !== "已取消");
+
         patch((s) => ({
           ...s,
           running: false,
@@ -313,7 +321,9 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
 
     // 重置（保留 started=true 以便 UI 立即切换到任务态）
     seenEventsRef.current = new Set();
+    finalFetchedRef.current = new Set();
     setState({
+
       ...defaultState,
       started: true,
       running: true,
@@ -351,8 +361,45 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
     await fetchFinalResult(jobId);
   }, [state.running, openStream, fetchFinalResult]);
 
+  /** 轮询兜底：NAS / 反向代理可能缓冲 text/event-stream，导致 SSE 事件到不了前端。 */
+  useEffect(() => {
+    const jobId = state.jobId;
+    if (!state.running || !jobId) return;
+    let stopped = false;
+    let busy = false;
+
+    const tick = async () => {
+      if (stopped || busy) return;
+      busy = true;
+      try {
+        const r = await ImportApi.getJob(jobId);
+        for (const ev of r.events as (OcrJobEvent & { ts: number })[]) {
+          handleEvent(ev);
+        }
+        const snap: OcrJobSnapshot = r.snapshot;
+        patch((s) => ({ ...s, progress: { finished: snap.finished, total: snap.total } }));
+        if (snap.status === "done" || snap.status === "error" || snap.status === "cancelled") {
+          await fetchFinalResult(jobId);
+        }
+      } catch (e: any) {
+        console.warn("[OCR] polling 兜底失败：", e?.message || e);
+      } finally {
+        busy = false;
+      }
+    };
+
+    const timer = window.setInterval(tick, 2000);
+    const starter = window.setTimeout(tick, 500);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.clearTimeout(starter);
+    };
+  }, [state.running, state.jobId, handleEvent, fetchFinalResult]);
+
   /** 用户在中途回到页面时：检测是否有进行中的 jobId，如果有就重连 SSE 并拉最新快照。 */
   const reattach = useCallback(async () => {
+
     const jobId = state.jobId;
     if (!jobId || !state.running) return;
     if (abortRef.current) return; // 已经在订阅
@@ -425,8 +472,10 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
     abortRef.current?.abort();
     abortRef.current = null;
     seenEventsRef.current = new Set();
+    finalFetchedRef.current = new Set();
     setState(defaultState);
   }, []);
+
 
   /**
    * 直接吃 portfolio-ocr Skill 产物的 JSON 文件，跳过视觉模型环节。
@@ -443,8 +492,10 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
       return;
     }
     seenEventsRef.current = new Set();
+    finalFetchedRef.current = new Set();
     setState({
       ...defaultState,
+
       started: true,
       running: false, // 没有真正"识别"过程
       jobId: null,
