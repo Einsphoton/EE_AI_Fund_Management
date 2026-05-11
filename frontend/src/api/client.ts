@@ -667,11 +667,13 @@ export const Admin = {
    *                "csv"  = 资产扁平表（Excel 友好，不含交易快照）
    * @param includeSnapshots 仅对 json 有意义；默认包含
    */
-  exportDownload: (format: "json" | "csv" = "json", includeSnapshots = true): void => {
+  exportDownload: (format: "json" | "csv" = "json", includeSnapshots = true, includeSettings = false): void => {
     const qs = new URLSearchParams({
       format,
       include_snapshots: String(includeSnapshots),
+      include_settings: String(includeSettings),
     });
+
     // 直接用 <a download> 下载，而不是 axios blob 再 createObjectURL——
     // 前者让浏览器原生决定保存位置，还能看到进度；后者会被内存占用
     const a = document.createElement("a");
@@ -706,6 +708,7 @@ export const Admin = {
       mode?: "merge" | "replace" | "skip";
       includeTransactions?: boolean;
       includeSnapshots?: boolean;
+      includeSettings?: boolean;
     } = {},
   ) => {
     const fd = new FormData();
@@ -713,6 +716,7 @@ export const Admin = {
     fd.append("mode", opts.mode || "merge");
     fd.append("include_transactions", String(opts.includeTransactions !== false));
     fd.append("include_snapshots", String(opts.includeSnapshots !== false));
+    fd.append("include_settings", String(!!opts.includeSettings));
     if (opts.mode === "replace") {
       fd.append("confirm", "I_UNDERSTAND_REPLACE_ALL");
     }
@@ -721,6 +725,7 @@ export const Admin = {
       timeout: 120_000,
     }).then((r) => r.data);
   },
+
 };
 
 export interface ImportResult {
@@ -730,7 +735,10 @@ export interface ImportResult {
   assets_skipped: number;
   transactions_added: number;
   snapshots_added: number;
+  settings_imported?: number;
+  skills_imported?: number;
   errors: string[];
+
   replaced_counts?: Record<string, number>;
 }
 

@@ -76,7 +76,9 @@ def _asset_to_dict(a: models.Asset) -> dict:
         "platform": a.platform or "",
         "note": a.note or "",
         "watch_only": bool(a.watch_only),
+        "target_source": a.target_source or "manual",
         "yield_7d": a.yield_7d,
+
         "expected_apr": a.expected_apr,
         "start_date": _dt_to_iso(a.start_date),
         "maturity_date": _dt_to_iso(a.maturity_date),
@@ -117,8 +119,30 @@ def _snap_to_dict(s: models.HoldingSnapshot) -> dict:
 # 导出
 # ============================================================
 
-def export_json(db: Session, *, include_snapshots: bool = True) -> dict:
+def _setting_to_dict(s: models.AppSetting) -> dict:
+    return {
+        "key": s.key,
+        "value": s.value,
+        "updated_at": _dt_to_iso(s.updated_at),
+    }
+
+
+def _skill_to_dict(s: models.Skill) -> dict:
+    return {
+        "skill_id": s.skill_id,
+        "name": s.name,
+        "description": s.description or "",
+        "category": s.category or "finance",
+        "source": s.source or "builtin",
+        "enabled": bool(s.enabled),
+        "config": s.config or {},
+        "installed_at": _dt_to_iso(s.installed_at),
+    }
+
+
+def export_json(db: Session, *, include_snapshots: bool = True, include_settings: bool = False) -> dict:
     """导出所有资产 + 交易 + 可选快照为一份 JSON 文档。
+
 
     结构：
     ```
@@ -149,7 +173,7 @@ def export_json(db: Session, *, include_snapshots: bool = True) -> dict:
             d["snapshots"] = [_snap_to_dict(s) for s in a.snapshots]
             total_snaps += len(d["snapshots"])
         out_assets.append(d)
-    return {
+    out = {
         "schema_version": SCHEMA_VERSION,
         "exported_at": _dt_to_iso(now_local()),
         "assets": out_assets,
@@ -157,8 +181,19 @@ def export_json(db: Session, *, include_snapshots: bool = True) -> dict:
             "assets": len(out_assets),
             "transactions": total_txns,
             "snapshots": total_snaps,
+            "settings": 0,
+            "skills": 0,
         },
     }
+    if include_settings:
+        settings = db.query(models.AppSetting).order_by(models.AppSetting.key).all()
+        skills = db.query(models.Skill).order_by(models.Skill.id).all()
+        out["app_settings"] = [_setting_to_dict(s) for s in settings]
+        out["skills"] = [_skill_to_dict(s) for s in skills]
+        out["stats"]["settings"] = len(settings)
+        out["stats"]["skills"] = len(skills)
+    return out
+
 
 
 def export_csv_assets(db: Session) -> str:
@@ -229,6 +264,8 @@ class ImportResult:
         self.assets_skipped = 0
         self.transactions_added = 0
         self.snapshots_added = 0
+        self.settings_imported = 0
+        self.skills_imported = 0
         self.errors: list[str] = []
         self.replaced_counts: dict = {}
 
@@ -240,9 +277,12 @@ class ImportResult:
             "assets_skipped": self.assets_skipped,
             "transactions_added": self.transactions_added,
             "snapshots_added": self.snapshots_added,
+            "settings_imported": self.settings_imported,
+            "skills_imported": self.skills_imported,
             "errors": self.errors,
             "replaced_counts": self.replaced_counts,
         }
+
 
 
 def _find_existing_asset(db: Session, asset_type: str, code: str) -> models.Asset | None:
@@ -286,14 +326,66 @@ def _snap_dedupe_key(s_dict: dict) -> tuple:
     )
 
 
+def _import_settings(db: Session, payload: dict, result: ImportResult) -> None:
+    items = payload.get("app_settings") or []
+    if not isinstance(items, list):
+        result.errors.append("app_settings 结构非法，已跳过")
+        return
+    for item in items:
+        if not isinstance(item, dict) or not item.get("key"):
+            continue
+        key = str(item.get("key"))
+        setting = db.get(models.AppSetting, key)
+        if setting is None:
+            db.add(models.AppSetting(
+                key=key,
+                value=item.get("value") if item.get("value") is not None else {},
+                updated_at=_iso_to_dt(item.get("updated_at")) or now_local(),
+            ))
+        else:
+            setting.value = item.get("value") if item.get("value") is not None else {}
+            setting.updated_at = _iso_to_dt(item.get("updated_at")) or now_local()
+        result.settings_imported += 1
+
+
+def _import_skills(db: Session, payload: dict, result: ImportResult) -> None:
+    items = payload.get("skills") or []
+    if not isinstance(items, list):
+        result.errors.append("skills 结构非法，已跳过")
+        return
+    for item in items:
+        if not isinstance(item, dict) or not item.get("skill_id"):
+            continue
+        skill_id = str(item.get("skill_id"))
+        skill = db.query(models.Skill).filter(models.Skill.skill_id == skill_id).first()
+        data = {
+            "name": item.get("name") or skill_id,
+            "description": item.get("description") or "",
+            "category": item.get("category") or "finance",
+            "source": item.get("source") or "import",
+            "enabled": bool(item.get("enabled", True)),
+            "config": item.get("config") or {},
+            "installed_at": _iso_to_dt(item.get("installed_at")) or now_local(),
+        }
+        if skill is None:
+            db.add(models.Skill(skill_id=skill_id, **data))
+        else:
+            for k, v in data.items():
+                setattr(skill, k, v)
+        result.skills_imported += 1
+
+
 def import_json(
+
     db: Session,
     payload: dict,
     *,
     mode: str = "merge",
     include_transactions: bool = True,
     include_snapshots: bool = True,
+    include_settings: bool = False,
 ) -> ImportResult:
+
     """从 JSON 文档导入。
 
     mode:
@@ -319,13 +411,20 @@ def import_json(
                 "todo_items": db.query(models.TodoItem).count(),
                 "assets": db.query(models.Asset).count(),
             }
+            if include_settings:
+                before["app_settings"] = db.query(models.AppSetting).count()
+                before["skills"] = db.query(models.Skill).count()
             # 顺序重要：子表先清（虽然有 CASCADE，但保险起见）
             db.execute(text("DELETE FROM transactions"))
             db.execute(text("DELETE FROM holding_snapshots"))
             db.execute(text("DELETE FROM advices"))
             db.execute(text("DELETE FROM todo_items"))
             db.execute(text("DELETE FROM assets"))
+            if include_settings:
+                db.execute(text("DELETE FROM app_settings"))
+                db.execute(text("DELETE FROM skills"))
             db.flush()
+
             result.replaced_counts = before
         except Exception as e:
             db.rollback()
@@ -348,9 +447,14 @@ def import_json(
                 f"#{idx}「{a_data.get('name', '?')}」导入失败：{type(e).__name__}: {str(e)[:150]}"
             )
 
+    if include_settings:
+        _import_settings(db, payload, result)
+        _import_skills(db, payload, result)
+
     try:
         db.commit()
     except Exception as e:
+
         db.rollback()
         result.errors.append(f"提交事务失败：{type(e).__name__}: {e}")
     return result
@@ -358,10 +462,11 @@ def import_json(
 
 # ─── asset 字段写入辅助：只在目标字段为空时填（用于 merge 模式）──
 _ASSET_SCALAR_FIELDS = (
-    "name", "platform", "note",
+    "name", "platform", "note", "target_source",
     "yield_7d", "expected_apr",
     "principal_amount",
 )
+
 _ASSET_DATE_FIELDS = ("start_date", "maturity_date")
 _ASSET_BOOL_FIELDS = ("watch_only", "is_principal_guaranteed")
 
@@ -456,7 +561,9 @@ def _import_one_asset(
             platform=a_data.get("platform") or "",
             note=a_data.get("note") or "",
             watch_only=bool(a_data.get("watch_only", False)),
+            target_source=a_data.get("target_source") or "manual",
             yield_7d=a_data.get("yield_7d"),
+
             expected_apr=a_data.get("expected_apr"),
             start_date=_iso_to_dt(a_data.get("start_date")),
             maturity_date=_iso_to_dt(a_data.get("maturity_date")),

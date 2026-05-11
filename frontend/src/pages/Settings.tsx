@@ -973,7 +973,9 @@ function BackupCard() {
   const [mode, setMode] = useState<"merge" | "replace" | "skip">("merge");
   const [includeTxns, setIncludeTxns] = useState(true);
   const [includeSnaps, setIncludeSnaps] = useState(true);
+  const [includeSettings, setIncludeSettings] = useState(false);
   const [replaceConfirm, setReplaceConfirm] = useState("");
+
   const [busy, setBusy] = useState(false);
   const [lastResult, setLastResult] = useState<ImportResult | null>(null);
 
@@ -1010,7 +1012,9 @@ function BackupCard() {
         mode,
         includeTransactions: includeTxns,
         includeSnapshots: includeSnaps,
+        includeSettings,
       });
+
       setLastResult(r);
       const n = r.assets_created + r.assets_updated + r.transactions_added + r.snapshots_added;
       toast.success(
@@ -1037,8 +1041,9 @@ function BackupCard() {
           <strong className="text-white/80"> 建议每月导出一份</strong>。
         </p>
 
-        <div className="grid sm:grid-cols-3 gap-3">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {/* 导出 JSON */}
+
           <button
             className="card !p-4 flex flex-col items-start gap-1 text-left hover:border-accent/40 transition"
             onClick={() => Admin.exportDownload("json", true)}
@@ -1053,8 +1058,23 @@ function BackupCard() {
             </div>
           </button>
 
+          {/* 导出所有 */}
+          <button
+            className="card !p-4 flex flex-col items-start gap-1 text-left hover:border-emerald2/40 transition"
+            onClick={() => Admin.exportDownload("json", true, true)}
+          >
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <FileJson className="w-4 h-4 text-emerald2" />
+              导出所有（含设置）
+            </div>
+            <div className="text-[11px] text-muted leading-relaxed">
+              含资产 + 交易 + 快照 + 设置页配置 + Skills。会包含 API Key，<strong className="text-amber2">请妥善保管</strong>。
+            </div>
+          </button>
+
           {/* 导出 CSV 资产 */}
           <button
+
             className="card !p-4 flex flex-col items-start gap-1 text-left hover:border-accent/40 transition"
             onClick={() => Admin.exportDownload("csv", false)}
           >
@@ -1178,8 +1198,8 @@ function BackupCard() {
               ))}
             </div>
 
-            {/* 子表开关 */}
-            <div className="flex items-center gap-4 mb-4">
+            {/* 子表/配置开关 */}
+            <div className="grid sm:grid-cols-2 gap-3 mb-4">
               <label className="flex items-center gap-2 cursor-pointer text-xs">
                 <input
                   type="checkbox" className="accent-accent w-4 h-4"
@@ -1198,7 +1218,19 @@ function BackupCard() {
                 />
                 导入持仓快照
               </label>
+              <label className="sm:col-span-2 flex items-start gap-2 cursor-pointer text-xs rounded-lg border border-amber2/30 bg-amber2/5 p-3">
+                <input
+                  type="checkbox" className="accent-accent w-4 h-4 mt-0.5"
+                  checked={includeSettings}
+                  onChange={(e) => setIncludeSettings(e.target.checked)}
+                  disabled={busy}
+                />
+                <span>
+                  导入设置页配置和 Skills（仅「导出所有」文件包含）。会覆盖当前 AI / 视觉模型 / 定时分析 / 预算等配置，可能包含 API Key。
+                </span>
+              </label>
             </div>
+
 
             {/* replace 模式的二次确认输入 */}
             {mode === "replace" && (
@@ -1228,7 +1260,11 @@ function BackupCard() {
                   <div>资产：新建 <span className="text-white">{lastResult.assets_created}</span> / 更新 <span className="text-white">{lastResult.assets_updated}</span> / 跳过 <span className="text-white">{lastResult.assets_skipped}</span></div>
                   <div>交易追加：<span className="text-white">{lastResult.transactions_added}</span> 条</div>
                   <div>快照追加：<span className="text-white">{lastResult.snapshots_added}</span> 条</div>
+                  {(lastResult.settings_imported || lastResult.skills_imported) ? (
+                    <div>配置恢复：设置 <span className="text-white">{lastResult.settings_imported || 0}</span> 项 / Skills <span className="text-white">{lastResult.skills_imported || 0}</span> 个</div>
+                  ) : null}
                   {lastResult.errors.length > 0 && (
+
                     <div className="mt-2 pt-2 border-t border-line/40">
                       <div className="text-amber2">警告 {lastResult.errors.length} 条：</div>
                       {lastResult.errors.slice(0, 5).map((err, i) => (

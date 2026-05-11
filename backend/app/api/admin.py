@@ -154,9 +154,11 @@ def wipe_all_data(
 def export_data(
     format: str = "json",
     include_snapshots: bool = True,
+    include_settings: bool = False,
     db: Session = Depends(get_db),
 ):
     """导出所有资产数据。
+
 
     format:
       - `json`（推荐）：完整备份，含 assets + transactions + snapshots，可直接用于恢复
@@ -166,17 +168,23 @@ def export_data(
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     if format == "json":
-        data = backup_service.export_json(db, include_snapshots=include_snapshots)
+        data = backup_service.export_json(
+            db,
+            include_snapshots=include_snapshots,
+            include_settings=include_settings,
+        )
         body = json.dumps(data, ensure_ascii=False, indent=2)
+
         # 用 PlainTextResponse + JSON content-type；直接 JSONResponse 会被 FastAPI 去掉
         # indent 并压成一行，不适合用户人眼阅读/手改
         return PlainTextResponse(
             content=body,
             media_type="application/json; charset=utf-8",
             headers={
-                "Content-Disposition": f'attachment; filename="fund_backup_{ts}.json"',
+                "Content-Disposition": f'attachment; filename="fund_{"full_backup" if include_settings else "backup"}_{ts}.json"',
                 "Cache-Control": "no-cache",
             },
+
         )
     elif format == "csv":
         body = backup_service.export_csv_assets(db)
@@ -217,9 +225,11 @@ async def import_data(
     mode: str = Form("merge", description="merge / replace / skip"),
     include_transactions: bool = Form(True),
     include_snapshots: bool = Form(True),
+    include_settings: bool = Form(False),
     confirm: str = Form("", description="mode=replace 必填 I_UNDERSTAND_REPLACE_ALL"),
     db: Session = Depends(get_db),
 ):
+
     """从导出的 JSON 文件恢复资产数据。
 
     mode:
@@ -266,6 +276,8 @@ async def import_data(
         mode=mode,
         include_transactions=include_transactions,
         include_snapshots=include_snapshots,
+        include_settings=include_settings,
     )
+
 
     return JSONResponse(content=result.to_dict())
