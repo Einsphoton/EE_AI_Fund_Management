@@ -24,9 +24,11 @@ from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..logging_config import log_ai_event, safe_ai_config
 from . import quotes as quotes_service
 from . import holdings as holding_service
 from . import settings_service, skills_service
+
 
 
 CHAT_SYSTEM_PROMPT = (
@@ -315,13 +317,13 @@ def _llm_client(ai_cfg: dict[str, Any]) -> OpenAI | None:
     import httpx as _httpx
     headers = _build_llm_headers(base_url, ai_cfg)
     has_cf = "CF-Access-Client-Id" in headers
-    # 关键诊断：每次创建 LLM client 都打印 CF Header 注入状态
-    print(
-        f"[chat._llm_client] base_url={base_url} "
-        f"cf_header_injected={has_cf} "
-        f"ai_cfg_has_cf_id={bool((ai_cfg or {}).get('cf_access_client_id'))} "
-        f"ai_cfg_has_cf_secret={bool((ai_cfg or {}).get('cf_access_client_secret'))}"
+    log_ai_event(
+        "chat",
+        "client_created",
+        config=safe_ai_config(ai_cfg),
+        cf_header_injected=has_cf,
     )
+
     http_client = _httpx.Client(timeout=120.0, headers=headers)
     # OpenAI SDK 会在更下层把 User-Agent 覆盖成 "OpenAI/Python x.x.x"，
     # 这个 UA 会被 Cloudflare 的 "Block AI Scrapers and Crawlers" 精准识别并 block。
@@ -395,6 +397,21 @@ async def stream_chat(db: Session, history: list[dict[str, str]], user_id: int |
 
     model = ai_cfg.get("model") or "deepseek-chat"
     temperature = float(ai_cfg.get("temperature", 0.4))
+    input_chars = sum(len(m.get("content", "")) for m in messages)
+    output_chars = 0
+    import time as _time
+    started_at = _time.perf_counter()
+
+    log_ai_event(
+        "chat",
+        "chat_stream_start",
+        config=safe_ai_config(ai_cfg),
+        history_messages=len(history),
+        total_messages=len(messages),
+        input_chars=input_chars,
+        portfolio_context_chars=len(portfolio_ctx),
+        skill_prompt_count=len(skill_prompts),
+    )
 
     def _do_stream():
         return client.chat.completions.create(
@@ -408,10 +425,26 @@ async def stream_chat(db: Session, history: list[dict[str, str]], user_id: int |
                 delta = chunk.choices[0].delta
                 content = getattr(delta, "content", None)
                 if content:
+                    output_chars += len(content)
                     yield content
-            except Exception:
+            except Exception as chunk_error:
+                log_ai_event(
+                    "chat",
+                    "chat_stream_chunk_parse_error",
+                    level="warning",
+                    error_type=type(chunk_error).__name__,
+                    error=str(chunk_error),
+                )
                 continue
+        log_ai_event(
+            "chat",
+            "chat_stream_done",
+            model=model,
+            output_chars=output_chars,
+            elapsed_ms=round((_time.perf_counter() - started_at) * 1000, 1),
+        )
     except Exception as e:
+
         # 友好诊断：根据异常类型给出具体的修复建议
         base_url = (ai_cfg or {}).get("base_url") or ""
         msg = str(e) or e.__class__.__name__
@@ -438,4 +471,14 @@ async def stream_chat(db: Session, history: list[dict[str, str]], user_id: int |
                 "- DeepSeek/OpenAI：检查 API Key 是否正确、是否欠费\n"
                 "- Ollama 不校验 Key，但前端要求非空，随便填都能通"
             )
+        log_ai_event(
+            "chat",
+            "chat_stream_failed",
+            level="error",
+            config=safe_ai_config(ai_cfg),
+            error_type=type(e).__name__,
+            error=msg,
+            elapsed_ms=round((_time.perf_counter() - started_at) * 1000, 1),
+        )
         yield f"\n\n[调用大模型失败] {msg}{hint}"
+

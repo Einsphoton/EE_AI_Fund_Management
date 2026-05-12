@@ -18,12 +18,20 @@ except Exception:
     # python-dotenv 未安装或加载失败时静默忽略，不影响生产容器用系统环境变量
     pass
 
-from fastapi import FastAPI
+import time
+import uuid
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from .config import settings
+from .logging_config import get_logger, set_log_context, setup_logging
+
+setup_logging()
+logger = get_logger("app.main")
+
 from .database import Base, engine, SessionLocal
 from .services import skills_service
 from . import scheduler as scheduler_mod
@@ -40,6 +48,8 @@ from .api import enrich as enrich_api
 from .api import admin as admin_api
 from .api import update_api
 from .api import auth_api
+from .api import logs_api
+
 
 
 
@@ -52,15 +62,22 @@ async def lifespan(app: FastAPI):
     _cf_sec = _os.getenv("CF_ACCESS_CLIENT_SECRET", "")
     _cf_hosts = _os.getenv("CF_ACCESS_HOSTS", "einsphoton.ren")
     if _cf_id and _cf_sec:
-        print(
-            f"[CF Access] Service Token loaded: id={_cf_id[:8]}...{_cf_id[-8:]} "
-            f"secret=***({len(_cf_sec)} chars) hosts={_cf_hosts}"
+        logger.info(
+            "cf_access_token_loaded",
+            extra={
+                "event": "cf_access_token_loaded",
+                "client_id_prefix": _cf_id[:8],
+                "client_id_suffix": _cf_id[-8:],
+                "secret_length": len(_cf_sec),
+                "hosts": _cf_hosts,
+            },
         )
     else:
-        print(
-            "[CF Access] Service Token NOT loaded. "
-            "Requests to einsphoton.ren may be blocked by Cloudflare."
+        logger.warning(
+            "cf_access_token_not_loaded",
+            extra={"event": "cf_access_token_not_loaded", "hosts": _cf_hosts},
         )
+
 
     Base.metadata.create_all(bind=engine)
     # 轻量级 schema 迁移（补字段等），必须在 create_all 之后
@@ -99,11 +116,44 @@ app.include_router(enrich_api.router)
 app.include_router(admin_api.router)
 app.include_router(update_api.router)
 app.include_router(auth_api.router)
+app.include_router(logs_api.router)
 
 
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    set_log_context(request_id=request_id, user_id="-")
+    start = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["x-request-id"] = request_id
+        return response
+    except Exception:
+        logger.exception(
+            "request_unhandled_exception",
+            extra={"event": "request_unhandled_exception", "method": request.method, "path": request.url.path},
+        )
+        raise
+    finally:
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
+        if request.url.path.startswith("/api") and request.url.path != "/api/health":
+            level = "warning" if status_code >= 400 else "info"
+            getattr(logger, level)(
+                "request_completed",
+                extra={
+                    "event": "request_completed",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": status_code,
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
 
 
 @app.get("/api/health")
+
 def health():
     # 运行时探针：用来快速判断当前 uvicorn 进程里加载的是不是最新代码。
     # 如果 prompt_has_commentary 为 False，但磁盘上代码已经是新版，说明进程没有 reload。

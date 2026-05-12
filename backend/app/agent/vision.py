@@ -41,7 +41,9 @@ from typing import Any
 from openai import OpenAI
 
 from .. import models
+from ..logging_config import log_ai_event, safe_ai_config
 from ..services import settings_service
+
 
 
 VISION_SYSTEM_PROMPT = """你是一个个人理财截图识别助手。用户会上传"持仓页"截图（理财通/支付宝/银行 App/券商 App 等）。
@@ -427,11 +429,14 @@ async def parse_image(
         max_tokens = OCR_FLOOR
     if max_tokens <= 0 or max_tokens < 1024:
         if max_tokens != OCR_FLOOR:
-            print(
-                f"[vision] max_tokens={max_tokens} 不合理（必须 >= 1024，"
-                f"OCR 持仓页常需 8192+），已自动抬高到 {OCR_FLOOR}"
+            log_ai_event(
+                "vision",
+                "vision_max_tokens_auto_raised",
+                old_max_tokens=max_tokens,
+                new_max_tokens=OCR_FLOOR,
             )
         max_tokens = OCR_FLOOR
+
     temperature = cfg.get("temperature", 0.1)
     model_name = cfg["model"]
 
@@ -476,12 +481,26 @@ async def parse_image(
     MAX_CONTENT_CHARS = int(cfg.get("content_hardcap", 20000))
     # ============================================================
 
+    log_ai_event(
+        "vision",
+        "vision_parse_start",
+        config=safe_ai_config(cfg),
+        model=model_name,
+        image_bytes=len(image_bytes),
+        processed_bytes=len(processed_bytes),
+        data_url_kb=len(data_url) // 1024,
+        max_tokens=max_tokens,
+        json_mode=use_json_mode,
+        stream=use_stream,
+        wall_timeout=MAX_WALL_SEC,
+    )
     await _log(
         f"已构造 prompt（图片转 base64 共 {len(data_url)//1024} KB）→ 调用 "
         f"{model_name}（temperature={temperature}, max_tokens={max_tokens}"
         f"{'（已从配置中的 ' + str(raw_mt) + ' 自动抬高，OCR 必须 >= 1024）' if raw_mt is not None and (not isinstance(raw_mt, int) or raw_mt < 1024) else ''}"
         f"{', json_mode=on' if use_json_mode else ''}, stream={'on' if use_stream else 'off'}）"
     )
+
 
     async def _call_model_oneshot(with_json_mode: bool, with_no_think: bool = False):
         """非流式调用：一次性 await 拿到完整响应。
@@ -1239,10 +1258,14 @@ async def parse_image(
             # 注意：底层 _call_with_retry 启动的 to_thread 可能还在跑（SDK 同步读），
             # 但我们不等它——它会在 HTTP read 超时 / TCP RST 时自然死亡，
             # 主路径立即推进到下一张图。
-            print(
-                f"[vision] WALL_TIMEOUT model={model_name} wall_sec={MAX_WALL_SEC} "
-                f"—— 强制结束本图，避免复读循环/上游挂起拖死整个批次"
+            log_ai_event(
+                "vision",
+                "vision_wall_timeout",
+                level="error",
+                model=model_name,
+                wall_sec=MAX_WALL_SEC,
             )
+
             # 硬超时通常意味着上游服务已经不稳（排队、复读循环、连接饱和）。
             # 给全局限速器注入一段惩罚期，让**并发的其它图先暂停一下**，
             # 避免"A 图刚超时，B/C 图紧接着也超时" 连锁反应。
@@ -1285,10 +1308,16 @@ async def parse_image(
         if loop_hit:
             # text_tail 用 !r 是故意的：它可能含 \n / \u200b 等不可见字符，需要看转义
             # 但 pattern 是给人读的中文描述，去掉 !r 避免 \uXXXX 噪声
-            print(
-                f"[vision] LOOP_DETECTED model={model_name} pattern=「{loop_pat}」 "
-                f"text_len={len(text)} text_tail={text[-200:]!r}"
+            log_ai_event(
+                "vision",
+                "vision_loop_detected",
+                level="error",
+                model=model_name,
+                pattern=loop_pat,
+                text_len=len(text),
+                text_tail=text[-200:],
             )
+
             await _log(
                 f"💥 模型在该图上陷入复读循环（重复输出「{loop_pat[:30]}…」），已强制中断；"
                 f"该图未能成功识别，建议重新上传或换张更清晰的截图"
@@ -1343,11 +1372,17 @@ async def parse_image(
                     body = str(resp_obj.text)[:600]
             except Exception:
                 pass
-        # 控制台打印完整错误，便于在后端日志里排查
-        print(f"[vision] FAIL model={cfg.get('model')} type={err_type} msg={err_msg[:300]}")
-        if body:
-            print(f"[vision] response_body={body}")
+        log_ai_event(
+            "vision",
+            "vision_call_failed",
+            level="error",
+            model=cfg.get("model"),
+            error_type=err_type,
+            error=err_msg[:1000],
+            response_body=body,
+        )
         await _log(f"视觉模型调用失败：{err_type}: {err_msg[:200]}")
+
 
         # 给前端一个可读的错误提示
         hint = ""
@@ -1400,10 +1435,17 @@ async def parse_image(
 
     parsed, parse_mode = _safe_parse(text)
     if not parsed or not isinstance(parsed, dict):
-        # 控制台打印原始响应前 800 字符，方便用户排错
-        print(f"[vision] PARSE_FAIL model={model_name} finish={finish_reason} "
-              f"text_len={len(text)} text_head={text[:800]!r}")
+        log_ai_event(
+            "vision",
+            "vision_parse_failed",
+            level="error",
+            model=model_name,
+            finish_reason=finish_reason,
+            text_len=len(text),
+            text_head=text[:800],
+        )
         await _log(
+
             f"模型返回不是合法 JSON（即使尝试剥离围栏 + 截断修复后仍失败）。"
             f"原始内容 {len(text)} 字符，前 200 字符：{text[:200]!r}"
         )
@@ -1452,12 +1494,25 @@ async def parse_image(
         if it.get("asset_type") not in valid_types:
             it["asset_type"] = "fund"  # 兜底
             fixed_types += 1
+    item_count = len(parsed["items"])
+    log_ai_event(
+        "vision",
+        "vision_parse_done",
+        model=model_name,
+        platform=parsed.get("platform"),
+        item_count=item_count,
+        parse_mode=parse_mode,
+        fixed_types=fixed_types,
+        finish_reason=finish_reason,
+        text_len=len(text),
+    )
     await _log(
         f"JSON 解析成功（{parse_mode}），平台={parsed.get('platform')}，"
-        f"识别到 {len(parsed['items'])} 项"
+        f"识别到 {item_count} 项"
         + (f"（{fixed_types} 项类型已兜底为 fund）" if fixed_types else "")
     )
     return parsed
+
 
 
 async def parse_images_concurrently(

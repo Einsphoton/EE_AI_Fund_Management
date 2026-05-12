@@ -560,7 +560,28 @@ export const UpdateApi = {
     api.post<TriggerUpdateResult>("/update/trigger", { confirm }, { timeout: 180_000 }).then((r) => r.data),
 };
 
+export interface LogFileInfo {
+  name: string;
+  size: number;
+  modified_at: number;
+}
+
+export interface LogsListResponse {
+  log_dir: string;
+  files: LogFileInfo[];
+  active_user_id: number;
+}
+
+export const LogsApi = {
+  list: () => api.get<LogsListResponse>("/logs", { timeout: 15_000 }).then((r) => r.data),
+  tail: (name = "ai.log", lines = 300) =>
+    api.get<string>("/logs/tail", { params: { name, lines }, responseType: "text", timeout: 15_000 }).then((r) => r.data),
+  downloadUrl: (name: string) => `/api/logs/download?name=${encodeURIComponent(name)}`,
+  bundleUrl: () => "/api/logs/bundle",
+};
+
 export const Skills = {
+
 
   installed: () => api.get<Skill[]>("/skills/installed").then((r) => r.data),
   marketplace: (q = "") =>

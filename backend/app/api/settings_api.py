@@ -14,7 +14,9 @@ from .. import models
 
 from ..services import settings_service
 from ..agent.profiles import list_profiles_public, list_report_styles_public
+from ..logging_config import log_ai_event, safe_ai_config
 from .. import scheduler as scheduler_mod
+
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -112,7 +114,13 @@ async def test_ai(p: TestAiPayload):
     2) 若失败，尝试 GET {base/v1 -> base}/api/tags  (Ollama 原生)
     """
     base = p.base_url.rstrip("/")
+    log_ai_event(
+        "settings",
+        "test_ai_start",
+        config=safe_ai_config(p.model_dump()),
+    )
     headers: dict[str, str] = {}
+
     if p.api_key:
         headers["Authorization"] = f"Bearer {p.api_key}"
 

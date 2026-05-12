@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..agent.hermes import _get_openai_client, _parse_json
 from ..agent.profiles import get_profile_prompt, get_profile_public
+from ..logging_config import log_ai_event, safe_ai_config
 from ..services import settings_service
+
 from ..services.investment_manager import get_budget_status
 from ..tz import now_local
 
@@ -125,8 +127,17 @@ async def recommend_ai_targets(db: Session, limit: int = 5, user_id: int | None 
     except (TypeError, ValueError):
         timeout_sec = 180
     client = _get_openai_client(base_url, api_key, timeout_sec, ai_cfg)
+    log_ai_event(
+        "target_recommender",
+        "target_recommend_start",
+        config=safe_ai_config(ai_cfg),
+        limit=limit,
+        existing_count=len(existing),
+        allowed_pair_count=len(allowed_pairs),
+    )
     try:
         resp = client.chat.completions.create(
+
             model=ai_cfg.get("model") or "deepseek-chat",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -137,10 +148,26 @@ async def recommend_ai_targets(db: Session, limit: int = 5, user_id: int | None 
         )
         text = resp.choices[0].message.content if resp.choices else ""
         parsed = _parse_json(text or "") or {}
+        log_ai_event(
+            "target_recommender",
+            "target_recommend_response",
+            model=ai_cfg.get("model") or "deepseek-chat",
+            text_len=len(text or ""),
+            parsed=bool(parsed),
+        )
     except Exception as e:
+        log_ai_event(
+            "target_recommender",
+            "target_recommend_failed",
+            level="error",
+            config=safe_ai_config(ai_cfg),
+            error_type=type(e).__name__,
+            error=str(e),
+        )
         raise TargetRecommendationError(f"AI 更新推荐标的失败：{type(e).__name__}: {e}") from e
 
     targets = parsed.get("targets") if isinstance(parsed, dict) else []
+
     if not isinstance(targets, list):
         targets = []
 

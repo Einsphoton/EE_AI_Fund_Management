@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 from . import models
 from .config import settings
 from .database import get_db
+from .logging_config import set_log_context
+
 
 _TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30
 _USERNAME_RE = re.compile(r"^[a-zA-Z0-9_\-.]{3,32}$")
@@ -125,4 +127,6 @@ def get_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="账号不存在或已停用")
     db.info["user_id"] = user.id
+    set_log_context(user_id=user.id)
     return user
+

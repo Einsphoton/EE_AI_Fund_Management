@@ -1,7 +1,8 @@
 import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, Wallet, Boxes, Sparkles, Settings as Cog, BrainCircuit, MessageSquare, Camera, ListTodo, Target, LogOut,
+  LayoutDashboard, Wallet, Boxes, Sparkles, Settings as Cog, BrainCircuit, MessageSquare, Camera, ListTodo, Target, LogOut, ScrollText,
 } from "lucide-react";
+
 
 import Dashboard from "./pages/Dashboard";
 import Assets from "./pages/Assets";
@@ -14,7 +15,9 @@ import ImportOcr from "./pages/ImportOcr";
 import Todos from "./pages/Todos";
 import Targets from "./pages/Targets";
 import RealizedRevenue from "./pages/RealizedRevenue";
+import Logs from "./pages/Logs";
 import AuthPage from "./pages/Auth";
+
 import { useAuth } from "./lib/auth";
 import { AnalysisTaskProvider } from "./lib/analysisTask";
 
@@ -32,8 +35,10 @@ const NAV = [
   { to: "/advice", label: "AI 分析我的资产", icon: BrainCircuit },
   { to: "/todos", label: "AI 投资建议", icon: ListTodo },
   { to: "/skills", label: "Skill 市场", icon: Boxes },
+  { to: "/logs", label: "运行日志", icon: ScrollText },
   { to: "/settings", label: "设置", icon: Cog },
 ];
+
 
 export default function App() {
   const loc = useLocation();
@@ -106,7 +111,9 @@ export default function App() {
               <Route path="/advice" element={<Advice />} />
               <Route path="/todos" element={<Todos />} />
               <Route path="/skills" element={<SkillMarket />} />
+              <Route path="/logs" element={<Logs />} />
               <Route path="/settings" element={<SettingsPage />} />
+
             </Routes>
           </div>
         </main>

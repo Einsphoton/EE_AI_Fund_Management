@@ -11,8 +11,10 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..agent.hermes import _get_openai_client, _parse_json
 from ..agent.profiles import get_profile_prompt, get_profile_public
+from ..logging_config import log_ai_event, safe_ai_config
 from ..services import holdings as holding_service, quotes as quotes_service, settings_service
 from ..tz import now_local
+
 
 SYSTEM_PROMPT = """
 你是专业投资经理。你会收到用户当前资产/标的观察池、投资者性格、各购买平台每月投资预算、当月已使用预算。
@@ -301,7 +303,16 @@ async def run_investment_manager(db: Session, user_id: int | None = None) -> dic
     parsed: dict[str, Any] | None = None
     if base_url and api_key:
         client = _get_openai_client(base_url, api_key, timeout_sec, ai_cfg)
+        log_ai_event(
+            "investment_manager",
+            "investment_plan_start",
+            config=safe_ai_config(ai_cfg),
+            asset_count=len(rows),
+            pending_todo_count=len(pending_todo_context),
+            budget_item_count=len(budget_status),
+        )
         user_payload = {
+
             "today": now_local().date().isoformat(),
             "investor_profile": profile_meta,
             "investor_profile_prompt": profile_prompt,
@@ -322,10 +333,25 @@ async def run_investment_manager(db: Session, user_id: int | None = None) -> dic
             )
             text = resp.choices[0].message.content if resp.choices else ""
             parsed = _parse_json(text or "")
+            log_ai_event(
+                "investment_manager",
+                "investment_plan_response",
+                model=model,
+                text_len=len(text or ""),
+                parsed=bool(parsed),
+            )
         except Exception as e:
-            print(f"[investment_manager] LLM failed: {type(e).__name__}: {e}")
+            log_ai_event(
+                "investment_manager",
+                "investment_plan_failed",
+                level="error",
+                config=safe_ai_config(ai_cfg),
+                error_type=type(e).__name__,
+                error=str(e),
+            )
 
     result = parsed if isinstance(parsed, dict) else _fallback_actions(rows, budget_status)
+
     actions = result.get("actions") if isinstance(result, dict) else []
     if not isinstance(actions, list):
         actions = []

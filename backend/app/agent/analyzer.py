@@ -9,12 +9,14 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import SessionLocal
+from ..logging_config import log_ai_event, safe_ai_config
 from ..services import quotes as quotes_service
 from ..services import holdings as holding_service
 from ..services import settings_service, skills_service
 from ..services import rate_limiter as rl_mod
 from ..tz import now_local
 from .hermes import run_agent
+
 
 
 def new_batch_id() -> str:
@@ -41,7 +43,15 @@ def _load_batch_context(db: Session, user_id: int | None = None) -> dict[str, An
         rpm_limit=int(ai_cfg.get("rpm_limit", 0) or 0),
         min_interval_sec=float(ai_cfg.get("min_interval_sec", 0) or 0),
     )
+    log_ai_event(
+        "analyzer",
+        "batch_context_loaded",
+        config=safe_ai_config(ai_cfg),
+        skill_count=len(skill_prompts),
+        skill_label=skill_label,
+    )
     return {
+
         "skill_prompts": skill_prompts,
         "skill_label": skill_label,
         "ai_cfg": ai_cfg,
@@ -64,8 +74,20 @@ async def _analyze_one_core(
              （流式 API 会把它接到 SSE 队列）。批量调度场景可不传。
     """
     quote_sources = settings_service.get(db, "quote_sources", user_id=user_id) or {}
+    log_ai_event(
+        "analyzer",
+        "asset_analysis_prepare",
+        batch_id=batch_id,
+        source=source,
+        asset_id=asset.id,
+        asset_name=asset.name,
+        asset_code=asset.code,
+        asset_type=asset.asset_type.value,
+        market=asset.market.value,
+    )
 
     quote = await quotes_service.fetch_quote(
+
         asset.asset_type.value, asset.market.value, asset.code, days=180,
         quote_sources=quote_sources,
     )
@@ -128,7 +150,19 @@ async def _analyze_one_core(
     db.add(advice)
     db.commit()
     db.refresh(advice)
+    log_ai_event(
+        "analyzer",
+        "asset_analysis_persisted",
+        batch_id=batch_id,
+        source=source,
+        asset_id=asset.id,
+        advice_id=advice.id,
+        action=advice.action,
+        confidence=advice.confidence,
+        skill_used=advice.skill_used,
+    )
     return advice
+
 
 
 async def analyze_one(
@@ -167,10 +201,19 @@ async def analyze_all(batch_id: Optional[str] = None, user_id: int | None = None
         assets: Iterable[models.Asset] = assets_q.all()
 
         asset_list = list(assets)
+        log_ai_event(
+            "analyzer",
+            "batch_analysis_start",
+            batch_id=batch_id,
+            total=len(asset_list),
+            concurrency=concurrency,
+            config=safe_ai_config(ctx["ai_cfg"]),
+        )
         if not asset_list:
             return 0
 
         sem = asyncio.Semaphore(concurrency)
+
         analyzed = 0
 
         async def _run(asset_id: int):
@@ -185,12 +228,29 @@ async def analyze_all(batch_id: Optional[str] = None, user_id: int | None = None
 
                     analyzed += 1
                 except Exception as e:  # pragma: no cover
-                    print(f"[analyzer] asset_id={asset_id} failed: {e}")
+                    log_ai_event(
+                        "analyzer",
+                        "batch_asset_failed",
+                        level="error",
+                        batch_id=batch_id,
+                        asset_id=asset_id,
+                        error_type=type(e).__name__,
+                        error=str(e),
+                    )
                 finally:
+
                     _db.close()
 
         await asyncio.gather(*(_run(a.id) for a in asset_list))
+        log_ai_event(
+            "analyzer",
+            "batch_analysis_done",
+            batch_id=batch_id,
+            analyzed=analyzed,
+            total=len(asset_list),
+        )
         return analyzed
+
     finally:
         db.close()
 
@@ -240,7 +300,16 @@ async def analyze_all_stream(user_id: int | None = None) -> AsyncIterator[dict]:
         assets = assets_q.all()
 
         total = len(assets)
+        log_ai_event(
+            "analyzer",
+            "stream_batch_analysis_start",
+            batch_id=batch_id,
+            total=total,
+            concurrency=concurrency,
+            config=safe_ai_config(ctx["ai_cfg"]),
+        )
         yield {
+
             "type": "start",
             "batch_id": batch_id,
             "total": total,
@@ -311,6 +380,17 @@ async def analyze_all_stream(user_id: int | None = None) -> AsyncIterator[dict]:
                         "skill_used": advice.skill_used,
                     })
                 except Exception as e:  # pragma: no cover
+                    log_ai_event(
+                        "analyzer",
+                        "stream_batch_asset_failed",
+                        level="error",
+                        batch_id=batch_id,
+                        asset_id=asset_id,
+                        asset_name=name,
+                        asset_code=code,
+                        error_type=type(e).__name__,
+                        error=str(e),
+                    )
                     await queue.put({
                         "type": "asset_error",
                         "asset_id": asset_id, "name": name, "code": code,
@@ -318,6 +398,7 @@ async def analyze_all_stream(user_id: int | None = None) -> AsyncIterator[dict]:
                         "error": str(e),
                     })
                 finally:
+
                     _db.close()
 
         # 启动所有 worker（受 Semaphore 限流，实际并发 = concurrency）
@@ -356,11 +437,20 @@ async def analyze_all_stream(user_id: int | None = None) -> AsyncIterator[dict]:
                 except Exception:
                     pass
 
+        log_ai_event(
+            "analyzer",
+            "stream_batch_analysis_done",
+            batch_id=batch_id,
+            analyzed=analyzed,
+            failed=failed,
+            total=total,
+        )
         yield {
             "type": "done",
             "batch_id": batch_id,
             "analyzed": analyzed,
             "failed": failed,
         }
+
     finally:
         main_db.close()

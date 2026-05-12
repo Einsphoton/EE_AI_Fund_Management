@@ -301,7 +301,34 @@ omlx serve --model <mlx-community/xxx-4bit> --host 0.0.0.0 --port 8080
 
 ---
 
+## 🪵 运行日志与 NAS 排障
+
+部署到 NAS / Docker 后，应用会同时输出到 `docker logs` 和持久化文件：
+
+- `data/logs/app.log`：全量结构化运行日志（JSON Lines）
+- `data/logs/ai.log`：AI Chat、资产分析、OCR、推荐标的、投资经理等 AI 专用日志
+- `data/logs/errors.log`：错误级别日志
+
+前端进入「运行日志」页面可以：
+
+1. 查看 `ai.log` / `app.log` 最新内容；
+2. 复制最近几百行发给排障助手；
+3. 一键导出 `ee-fund-diagnostics.zip`（含脱敏配置和日志文件）。
+
+Docker 环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `LOG_LEVEL` | `INFO` | 日志级别，排障可临时设 `DEBUG` |
+| `LOG_MAX_BYTES` | `10485760` | 单个日志文件最大字节数，默认 10MB |
+| `LOG_BACKUP_COUNT` | `5` | 每类日志保留的轮转文件数 |
+
+日志会自动脱敏 `api_key`、`Authorization`、`token`、`secret`、`password` 等字段。
+
+---
+
 ## 📊 AI 建议字段说明
+
 
 每次分析会落库一条 `Advice` 记录，结构如下：
 

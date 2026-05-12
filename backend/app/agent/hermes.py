@@ -17,7 +17,9 @@ from typing import Any
 import httpx
 from openai import OpenAI
 
+from ..logging_config import log_ai_event, safe_ai_config
 from .profiles import get_profile_prompt, get_profile_public, get_report_style_prompt
+
 
 
 # ---------------------------------------------------------------------------
@@ -629,8 +631,15 @@ def run_agent(
         timeout_sec = 180
     # 思考强制开 + 用户没显式调大超时 → 自动抬到 240s（思考会多花时间）
     if thinking_mode == "on" and timeout_sec < 240:
-        print(f"[hermes] thinking_mode=on, 把 timeout 从 {timeout_sec} 抬到 240s")
+        log_ai_event(
+            "hermes",
+            "timeout_auto_raised",
+            old_timeout=timeout_sec,
+            new_timeout=240,
+            thinking_mode=thinking_mode,
+        )
         timeout_sec = 240
+
 
     # max_tokens 下限：思考开 → 8192；思考关/auto → 4096
     REASONING_FLOOR = 8192 if thinking_mode == "on" else 4096
@@ -643,8 +652,15 @@ def run_agent(
     except (TypeError, ValueError):
         max_tokens = REASONING_FLOOR
     if 0 < max_tokens < REASONING_FLOOR:
-        print(f"[hermes] max_tokens={max_tokens} 偏小 (thinking={thinking_mode} 下限 {REASONING_FLOOR})，已自动抬高")
+        log_ai_event(
+            "hermes",
+            "max_tokens_auto_raised",
+            old_max_tokens=max_tokens,
+            new_max_tokens=REASONING_FLOOR,
+            thinking_mode=thinking_mode,
+        )
         max_tokens = REASONING_FLOOR
+
 
     # 把投资性格 + 报告风格注入 system prompt，并把性格元信息随分析结果落库。
     profile_id = (ai_config or {}).get("investor_profile")
@@ -681,7 +697,24 @@ def run_agent(
     # - 业务错误（401/400 等）：不重试
     import time as _time
     MAX_ATTEMPTS = 4
+    started_at = _time.perf_counter()
+    log_ai_event(
+        "hermes",
+        "asset_analysis_start",
+        config=safe_ai_config(ai_config),
+        asset={
+            "name": asset.get("name"),
+            "code": asset.get("code"),
+            "asset_type": asset.get("asset_type"),
+            "market": asset.get("market"),
+        },
+        points_count=len(points),
+        skill_used_label=skill_used_label,
+        timeout_sec=timeout_sec,
+        max_tokens=max_tokens,
+    )
     for attempt in range(MAX_ATTEMPTS):
+
         try:
             client = _get_openai_client(base_url, api_key, timeout_sec, ai_config)
             messages = build_prompt(
@@ -742,11 +775,18 @@ def run_agent(
                     # 诊断日志：LLM 实际返回了哪些字段 + commentary 长度
                     comm_len = len(str(p.get("commentary") or ""))
                     adv_len = len(str(p.get("advice") or ""))
-                    print(
-                        f"[hermes] parsed ok from '{label}' finish={finish_reason} "
-                        f"keys={sorted(p.keys())} commentary_len={comm_len} advice_len={adv_len}"
+                    log_ai_event(
+                        "hermes",
+                        "asset_analysis_parse_ok",
+                        source=label,
+                        finish_reason=finish_reason,
+                        parsed_keys=sorted(p.keys()),
+                        commentary_len=comm_len,
+                        advice_len=adv_len,
+                        attempt=attempt + 1,
                     )
                     break
+
             if parsed:
                 break
             # 没解析出 JSON：触发重试（但只多试一次，避免 reasoning 模型连续踩同一个坑空耗）
@@ -788,9 +828,22 @@ def run_agent(
             )
             is_retryable = is_429 or is_5xx or is_conn
             kind = "429 限流" if is_429 else ("5xx 网关错" if is_5xx else ("连接错" if is_conn else "其他"))
-            print(f"[hermes] attempt {attempt+1}/{MAX_ATTEMPTS} failed [{kind}]: "
-                  f"{err_type}: {err_str[:200]} (retryable={is_retryable})")
+            log_ai_event(
+                "hermes",
+                "asset_analysis_attempt_failed",
+                level="warning" if is_retryable else "error",
+                attempt=attempt + 1,
+                max_attempts=MAX_ATTEMPTS,
+                error_kind=kind,
+                error_type=err_type,
+                error=err_str[:1000],
+                retryable=is_retryable,
+                is_429=is_429,
+                is_5xx=is_5xx,
+                is_connection_error=is_conn,
+            )
             if not is_retryable:
+
                 # 业务错误（401/400/模型不存在等）不重试
                 break
             if attempt + 1 < MAX_ATTEMPTS:
@@ -808,8 +861,15 @@ def run_agent(
                                 backoff = max(0.5, min(60.0, float(ra)))
                     except Exception:
                         pass
-                print(f"[hermes] backoff {backoff:.1f}s before retry...")
+                log_ai_event(
+                    "hermes",
+                    "asset_analysis_retry_backoff",
+                    attempt=attempt + 1,
+                    backoff_sec=backoff,
+                    error_kind=kind,
+                )
                 _time.sleep(backoff)
+
             continue
 
     fallback = _heuristic(points, holding)
@@ -830,9 +890,19 @@ def run_agent(
             )
 
         if salvaged:
+            log_ai_event(
+                "hermes",
+                "asset_analysis_partial_salvaged",
+                level="warning",
+                model=model,
+                finish_reason=finish_reason,
+                error=err_str,
+                elapsed_ms=round((_time.perf_counter() - started_at) * 1000, 1),
+            )
             patched = dict(fallback)
             patched.update(salvaged)
             coerced = _coerce_result(patched, fallback)
+
             detail_parts = [
                 "⚠️ 大模型返回未能完整解析为 JSON，已尝试从原文中救援部分字段。",
             ]
@@ -847,9 +917,19 @@ def run_agent(
                 "detail": "\n\n".join(detail_parts),
                 "skill_used": skill_used_label or f"{model}(partial)",
             }
+        log_ai_event(
+            "hermes",
+            "asset_analysis_fallback",
+            level="error" if last_err else "warning",
+            model=model,
+            finish_reason=finish_reason,
+            error=err_str,
+            elapsed_ms=round((_time.perf_counter() - started_at) * 1000, 1),
+        )
         fallback_detail = fallback.pop("detail", "")
         profile_note = _default_profile_note(profile_meta, str(fallback.get("action", "")))
         return {
+
             **fallback,
             "profile_note": profile_note,
             "investor_profile": profile_meta,
@@ -893,9 +973,22 @@ def run_agent(
         )
     detail_text = "\n\n".join(detail_parts)
 
+    log_ai_event(
+        "hermes",
+        "asset_analysis_done",
+        model=model,
+        source=successful_source or "content",
+        finish_reason=finish_reason,
+        action=coerced.get("action"),
+        confidence=coerced.get("confidence"),
+        summary_len=len(str(coerced.get("summary") or "")),
+        detail_len=len(detail_text),
+        elapsed_ms=round((_time.perf_counter() - started_at) * 1000, 1),
+    )
     return {
         **coerced,
         "investor_profile": profile_meta,
         "detail": detail_text,
         "skill_used": skill_used_effective,
     }
+
