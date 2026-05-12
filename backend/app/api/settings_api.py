@@ -8,7 +8,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
+from ..auth import get_current_user
 from ..database import get_db
+from .. import models
+
 from ..services import settings_service
 from ..agent.profiles import list_profiles_public, list_report_styles_public
 from .. import scheduler as scheduler_mod
@@ -30,18 +33,27 @@ class UpdatePayload(BaseModel):
 
 
 @router.get("")
-def get_all(db: Session = Depends(get_db)):
-    return settings_service.get_all(db)
+def get_all(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return settings_service.get_all(db, user_id=current_user.id)
+
 
 
 @router.get("/debug/cf-access")
-def debug_cf_access(db: Session = Depends(get_db)):
+def debug_cf_access(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+
     """只读诊断接口：查看 DB 中 CF Access 配置是否真的存进去了。
 
     出于安全考虑，只返回是否存在 + Client Id 脱敏，不会泄漏 Secret。
     """
     import os
-    ai = settings_service.get(db, "ai") or {}
+    ai = settings_service.get(db, "ai", user_id=current_user.id) or {}
+
     cf_id = str(ai.get("cf_access_client_id") or "").strip()
     cf_sec = str(ai.get("cf_access_client_secret") or "").strip()
     cf_hosts = str(ai.get("cf_access_hosts") or "").strip()
@@ -69,8 +81,14 @@ def debug_cf_access(db: Session = Depends(get_db)):
 
 
 @router.put("/{key}")
-def put_setting(key: str, payload: UpdatePayload, db: Session = Depends(get_db)):
-    settings_service.set_value(db, key, payload.value)
+def put_setting(
+    key: str,
+    payload: UpdatePayload,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    settings_service.set_value(db, key, payload.value, user_id=current_user.id)
+
     if key == "schedule":
         cron = scheduler_mod.reload_schedule()
         return {"ok": True, "applied_cron": cron}

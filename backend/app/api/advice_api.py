@@ -11,7 +11,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
+from ..auth import get_current_user
 from ..database import get_db
+
 from ..agent.analyzer import analyze_one, analyze_all, analyze_all_stream
 
 router = APIRouter(prefix="/api/advice", tags=["advice"])
@@ -22,48 +24,68 @@ def list_recent(
     limit: int = 200,
     source: str | None = None,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+
     """列出最近建议。
 
     - `source=batch` → 只返回批量分析的建议（AI 建议页用）
     - `source=single` → 只返回单独分析的建议
     - 不传 → 全部返回
     """
-    q = db.query(models.Advice)
+    q = db.query(models.Advice).join(models.Asset, models.Asset.id == models.Advice.asset_id)
+    q = q.filter(models.Asset.user_id == current_user.id)
     if source:
+
         q = q.filter(models.Advice.source == source)
     return q.order_by(models.Advice.created_at.desc()).limit(limit).all()
 
 
 @router.get("/asset/{asset_id}", response_model=List[schemas.AdviceOut])
-def list_by_asset(asset_id: int, limit: int = 50, db: Session = Depends(get_db)):
+def list_by_asset(
+    asset_id: int,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """按标的列出历史建议，不过滤 source（详情页要看全部）。"""
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+    if not asset:
+        raise HTTPException(404, "asset not found")
     return (
         db.query(models.Advice)
         .filter_by(asset_id=asset_id)
+
         .order_by(models.Advice.created_at.desc())
         .limit(limit).all()
     )
 
 
 @router.post("/run/{asset_id}", response_model=schemas.AdviceOut)
-async def run_for_asset(asset_id: int, db: Session = Depends(get_db)):
+async def run_for_asset(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """单独分析一个标的，默认 source=single，不会出现在全局 AI 建议页。"""
-    asset = db.get(models.Asset, asset_id)
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     return await analyze_one(db, asset)  # source 默认 "single"
 
 
 @router.post("/run-all")
-async def run_for_all():
+async def run_for_all(current_user: models.User = Depends(get_current_user)):
     """同步版：一次性跑完，只返回总数（保留向后兼容）。"""
-    n = await analyze_all()
+    n = await analyze_all(user_id=current_user.id)
+
     return {"analyzed": n}
 
 
 @router.post("/run-all/stream")
-async def run_for_all_stream():
+async def run_for_all_stream(current_user: models.User = Depends(get_current_user)):
+
     """流式版（SSE）：每分析完一个标的立刻把状态推给前端。
 
     前端消费方式：
@@ -73,7 +95,8 @@ async def run_for_all_stream():
     """
     async def _gen():
         try:
-            async for evt in analyze_all_stream():
+            async for evt in analyze_all_stream(user_id=current_user.id):
+
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         except asyncio.CancelledError:

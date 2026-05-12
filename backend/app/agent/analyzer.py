@@ -26,11 +26,13 @@ def new_batch_id() -> str:
 # ---------------------------------------------------------------------------
 # 批内共享上下文：避免每个标的都重复查 Skill、重复读 settings.ai。
 # ---------------------------------------------------------------------------
-def _load_batch_context(db: Session) -> dict[str, Any]:
+def _load_batch_context(db: Session, user_id: int | None = None) -> dict[str, Any]:
+
     skills = db.query(models.Skill).filter_by(enabled=True).all()
     skill_prompts = [skills_service.get_skill_prompt(s.skill_id) for s in skills]
     skill_label = ",".join(s.skill_id for s in skills) or "default"
-    ai_cfg = settings_service.get(db, "ai") or {}
+    ai_cfg = settings_service.get(db, "ai", user_id=user_id) or {}
+
     # 把 ai 的 RPM 限速也注册进全局 RateLimiter（key="ai"）。
     # configure 是幂等的：每次批量分析都会按当前 ai 配置刷新一遍参数；
     # 历史 window 会保留，避免改了配置就"忘掉"刚发出去的请求。
@@ -53,13 +55,16 @@ async def _analyze_one_core(
     source: str,
     ctx: dict[str, Any],
     on_log: Optional[Callable[[str], Any]] = None,
+    user_id: int | None = None,
 ) -> models.Advice:
+
     """实际分析逻辑：拉行情 -> 限速 -> 调 LLM -> 落库。
 
     on_log : 可选回调（同步或 awaitable），用于把"限速等待"等事件实时报给上层
              （流式 API 会把它接到 SSE 队列）。批量调度场景可不传。
     """
-    quote_sources = settings_service.get(db, "quote_sources") or {}
+    quote_sources = settings_service.get(db, "quote_sources", user_id=user_id) or {}
+
     quote = await quotes_service.fetch_quote(
         asset.asset_type.value, asset.market.value, asset.code, days=180,
         quote_sources=quote_sources,
@@ -138,11 +143,15 @@ async def analyze_one(
     - source="batch"：由批量分析流程调用，结果会出现在全局"AI 建议"页
     """
     batch_id = batch_id or new_batch_id()
-    ctx = _load_batch_context(db)
-    return await _analyze_one_core(db, asset, batch_id, source, ctx)
+    user_id = asset.user_id
+    ctx = _load_batch_context(db, user_id=user_id)
+
+    return await _analyze_one_core(db, asset, batch_id, source, ctx, user_id=user_id)
 
 
-async def analyze_all(batch_id: Optional[str] = None) -> int:
+
+async def analyze_all(batch_id: Optional[str] = None, user_id: int | None = None) -> int:
+
     """供调度器调用：分析所有资产以及标的（含 watch-only），统一 source=batch。
 
     使用 settings.ai.batch_concurrency 控制并发度（默认 4）。
@@ -150,9 +159,13 @@ async def analyze_all(batch_id: Optional[str] = None) -> int:
     batch_id = batch_id or new_batch_id()
     db = SessionLocal()
     try:
-        ctx = _load_batch_context(db)
+        ctx = _load_batch_context(db, user_id=user_id)
         concurrency = _resolve_concurrency(ctx["ai_cfg"])
-        assets: Iterable[models.Asset] = db.query(models.Asset).all()
+        assets_q = db.query(models.Asset)
+        if user_id is not None:
+            assets_q = assets_q.filter(models.Asset.user_id == user_id)
+        assets: Iterable[models.Asset] = assets_q.all()
+
         asset_list = list(assets)
         if not asset_list:
             return 0
@@ -168,7 +181,8 @@ async def analyze_all(batch_id: Optional[str] = None) -> int:
                     a = _db.get(models.Asset, asset_id)
                     if a is None:
                         return
-                    await _analyze_one_core(_db, a, batch_id, "batch", ctx)
+                    await _analyze_one_core(_db, a, batch_id, "batch", ctx, user_id=user_id)
+
                     analyzed += 1
                 except Exception as e:  # pragma: no cover
                     print(f"[analyzer] asset_id={asset_id} failed: {e}")
@@ -196,7 +210,8 @@ def _resolve_concurrency(ai_cfg: dict[str, Any]) -> int:
 
 
 # ---- 流式版：并发执行，谁先完成谁先向调用方推送事件 ----
-async def analyze_all_stream() -> AsyncIterator[dict]:
+async def analyze_all_stream(user_id: int | None = None) -> AsyncIterator[dict]:
+
     """分析所有资产以及标的并流式产出进度事件（并发版）。
 
     事件类型：
@@ -216,10 +231,14 @@ async def analyze_all_stream() -> AsyncIterator[dict]:
     batch_id = new_batch_id()
     main_db = SessionLocal()
     try:
-        ctx = _load_batch_context(main_db)
+        ctx = _load_batch_context(main_db, user_id=user_id)
         concurrency = _resolve_concurrency(ctx["ai_cfg"])
 
-        assets = main_db.query(models.Asset).all()
+        assets_q = main_db.query(models.Asset)
+        if user_id is not None:
+            assets_q = assets_q.filter(models.Asset.user_id == user_id)
+        assets = assets_q.all()
+
         total = len(assets)
         yield {
             "type": "start",
@@ -278,7 +297,9 @@ async def analyze_all_stream() -> AsyncIterator[dict]:
                     advice = await _analyze_one_core(
                         _db, a, batch_id, "batch", ctx,
                         on_log=_on_wait_log,
+                        user_id=user_id,
                     )
+
                     await queue.put({
                         "type": "asset_done",
                         "asset_id": asset_id, "name": name, "code": code,

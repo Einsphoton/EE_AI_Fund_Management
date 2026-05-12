@@ -1,7 +1,8 @@
 import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, Wallet, Boxes, Sparkles, Settings as Cog, BrainCircuit, MessageSquare, Camera, ListTodo, Target,
+  LayoutDashboard, Wallet, Boxes, Sparkles, Settings as Cog, BrainCircuit, MessageSquare, Camera, ListTodo, Target, LogOut,
 } from "lucide-react";
+
 import Dashboard from "./pages/Dashboard";
 import Assets from "./pages/Assets";
 import AssetDetail from "./pages/AssetDetail";
@@ -13,7 +14,10 @@ import ImportOcr from "./pages/ImportOcr";
 import Todos from "./pages/Todos";
 import Targets from "./pages/Targets";
 import RealizedRevenue from "./pages/RealizedRevenue";
+import AuthPage from "./pages/Auth";
+import { useAuth } from "./lib/auth";
 import { AnalysisTaskProvider } from "./lib/analysisTask";
+
 
 import { OcrTaskProvider } from "./lib/ocrTask";
 import AnalysisTaskIndicator from "./components/AnalysisTaskIndicator";
@@ -33,8 +37,18 @@ const NAV = [
 
 export default function App() {
   const loc = useLocation();
+  const { user, loading, logout } = useAuth();
   void loc;
+
+  if (loading) {
+    return <div className="min-h-screen bg-bg flex items-center justify-center text-muted">正在恢复登录状态…</div>;
+  }
+  if (!user) {
+    return <AuthPage />;
+  }
+
   return (
+
     <AnalysisTaskProvider>
       <OcrTaskProvider>
       <div className="min-h-screen flex bg-bg bg-grid-fade">
@@ -66,9 +80,16 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
+          <div className="mx-3 mb-3 p-3 rounded-xl border border-line bg-bg-soft/60">
+            <div className="text-xs text-white truncate">{user.username}</div>
+            <button className="mt-2 text-[11px] text-muted hover:text-white inline-flex items-center gap-1" onClick={logout}>
+              <LogOut className="w-3 h-3" /> 退出登录
+            </button>
+          </div>
           <div className="p-4 mx-3 mb-4 rounded-xl border border-line bg-bg-soft/60 text-[11px] text-muted leading-relaxed">
             ⚠️ 平台仅作研究参考，AI 输出不构成投资建议。
           </div>
+
         </aside>
 
         <main className="flex-1 min-w-0">

@@ -68,8 +68,10 @@ def run_migrations() -> None:
         cols = {c["name"] for c in insp.get_columns("assets")}
         with engine.begin() as conn:
             new_cols = [
+                ("user_id", "INTEGER"),
                 ("target_source", "VARCHAR(16) DEFAULT 'manual'"),
                 ("yield_7d", "FLOAT"),
+
                 ("expected_apr", "FLOAT"),
                 ("start_date", "DATETIME"),
                 ("maturity_date", "DATETIME"),

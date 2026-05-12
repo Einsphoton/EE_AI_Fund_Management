@@ -22,7 +22,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..auth import get_current_user
 from ..database import get_db, SessionLocal
+
 from ..tz import now_local
 from ..agent import vision as vision_agent
 from ..services import snapshot_service
@@ -35,7 +37,8 @@ router = APIRouter(prefix="/api/import", tags=["import"])
 # /parse: 解析阶段（不入库）
 # ============================================================
 
-def _match_candidates(db: Session, item: dict, platform_hint: str) -> list[dict]:
+def _match_candidates(db: Session, item: dict, platform_hint: str, user_id: int | None = None) -> list[dict]:
+
     """对一条 OCR 结果，找现有资产候选（用于前端下拉）。
 
     匹配规则（极度保守，宁可错杀 = 新建，不可错容 = 误绑污染历史）：
@@ -70,7 +73,11 @@ def _match_candidates(db: Session, item: dict, platform_hint: str) -> list[dict]
 
     # ---- 第 1 关：真实 code 强匹配 ----
     if ocr_code_real:
-        for a in db.query(models.Asset).filter(models.Asset.code == code).all():
+        q = db.query(models.Asset).filter(models.Asset.code == code)
+        if user_id is not None:
+            q = q.filter(models.Asset.user_id == user_id)
+        for a in q.all():
+
             same_platform = (a.platform or "") == (platform_hint or "")
             score = 1.0 if same_platform else 0.95
             candidates.append((score, a))
@@ -80,7 +87,10 @@ def _match_candidates(db: Session, item: dict, platform_hint: str) -> list[dict]
         NAME_THRESHOLD = 0.95
         # 同类型（fund/etf/stock 等）优先；跨类型直接跳过，避免"理财"撞到"基金"
         query = db.query(models.Asset)
+        if user_id is not None:
+            query = query.filter(models.Asset.user_id == user_id)
         if asset_type:
+
             try:
                 at_enum = models.AssetType(asset_type)
                 query = query.filter(models.Asset.asset_type == at_enum)
@@ -131,7 +141,8 @@ def _match_candidates(db: Session, item: dict, platform_hint: str) -> list[dict]
     ]
 
 
-def _suggest_action(item: dict, top_candidate: Optional[dict], db: Session) -> dict:
+def _suggest_action(item: dict, top_candidate: Optional[dict], db: Session, user_id: int | None = None) -> dict:
+
     """根据 OCR 结果与候选资产，给一个建议动作。
 
     前提：top_candidate 只会在 score ≥ 0.95 时传进来（由 _match_candidates 保证）。
@@ -143,7 +154,8 @@ def _suggest_action(item: dict, top_candidate: Optional[dict], db: Session) -> d
         return {"action": "create", "reason": "未匹配到现有资产，建议新建"}
 
     asset_id = top_candidate["asset_id"]
-    asset = db.get(models.Asset, asset_id)
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=user_id).first() if user_id is not None else db.get(models.Asset, asset_id)
+
     if not asset:
         return {"action": "create", "reason": "候选已不存在，建议新建"}
 
@@ -195,8 +207,10 @@ async def parse_screenshots(
     files: list[UploadFile] = File(..., description="持仓页截图（支持多张）"),
     platform_hint: str = Form("", description="平台提示，例如 微信理财通 / 招商银行 / 富途"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """上传 N 张截图，逐张走视觉模型解析，返回每张图的 items + 匹配候选 + 建议动作。
+
 
     不入库；前端拿这份结果做对账，再调 /commit 真正写入。
     """
@@ -220,11 +234,12 @@ async def parse_screenshots(
     for i, r in enumerate(raw_results):
         items = r.get("items") or []
         for it in items:
-            cands = _match_candidates(db, it, r.get("platform") or platform_hint)
+            cands = _match_candidates(db, it, r.get("platform") or platform_hint, current_user.id)
             top = cands[0] if cands else None
-            suggestion = _suggest_action(it, top, db)
+            suggestion = _suggest_action(it, top, db, current_user.id)
             it["_candidates"] = cands
             it["_suggestion"] = suggestion
+
         out.append({
             "file": file_names[i] if i < len(file_names) else "",
             "platform": r.get("platform"),
@@ -243,7 +258,9 @@ async def parse_screenshots(
 async def start_ocr_job(
     files: list[UploadFile] = File(..., description="持仓页截图（支持多张）"),
     platform_hint: str = Form("", description="平台提示"),
+    current_user: models.User = Depends(get_current_user),
 ) -> dict[str, Any]:
+
     """上传 N 张截图 → 立即返回 job_id，后台异步跑视觉模型。
 
     前端拿到 job_id 后用 /jobs/{id}/stream 订阅进度；切换路由再回来用 /jobs/{id}
@@ -269,7 +286,9 @@ async def start_ocr_job(
         total=len(images),
         platform_hint=platform_hint,
         file_names=file_names,
+        user_id=current_user.id,
     )
+
 
     # 后台跑：注入 match/suggest 函数 + db_factory（每张图独立 session）
     asyncio.create_task(ocr_jobs.run_parse_job(
@@ -277,22 +296,29 @@ async def start_ocr_job(
         db_factory=SessionLocal,
         match_fn=_match_candidates,
         suggest_fn=_suggest_action,
+        user_id=current_user.id,
     ))
+
 
     return {"job_id": job.job_id, "snapshot": job.snapshot()}
 
 
 @router.get("/ocr/jobs/{job_id}/stream")
-async def stream_ocr_job(job_id: str):
+async def stream_ocr_job(
+    job_id: str,
+    current_user: models.User = Depends(get_current_user),
+):
+
     """SSE 推送某个 OCR 任务的思考过程 + 进度。
 
     重连友好：连上时先 replay 全部历史事件，让前端 UI 跳到当前状态。
     """
     job = ocr_jobs.manager.get(job_id)
-    if not job:
+    if not job or getattr(job, "user_id", None) != current_user.id:
         raise HTTPException(404, f"job {job_id} 不存在或已过期")
 
     queue = await ocr_jobs.manager.subscribe(job)
+
 
     async def gen():
         try:
@@ -336,15 +362,20 @@ async def stream_ocr_job(job_id: str):
 
 
 @router.get("/ocr/jobs/{job_id}")
-def get_ocr_job(job_id: str) -> dict[str, Any]:
+def get_ocr_job(
+    job_id: str,
+    current_user: models.User = Depends(get_current_user),
+) -> dict[str, Any]:
+
     """拉取某个 OCR 任务的快照 + 最终结果（如果已完成）。
 
     用于：用户切走再回来，先调这个一次性挂回 UI。
     """
     job = ocr_jobs.manager.get(job_id)
-    if not job:
+    if not job or getattr(job, "user_id", None) != current_user.id:
         raise HTTPException(404, f"job {job_id} 不存在或已过期")
     return {
+
         "snapshot": job.snapshot(),
         "events": job.events,
         "result": job.result,
@@ -352,13 +383,21 @@ def get_ocr_job(job_id: str) -> dict[str, Any]:
 
 
 @router.get("/ocr/jobs")
-def list_ocr_jobs(limit: int = 10) -> dict[str, Any]:
+def list_ocr_jobs(
+    limit: int = 10,
+    current_user: models.User = Depends(get_current_user),
+) -> dict[str, Any]:
     """最近 OCR 任务列表（用于前端启动时探测是否有进行中的任务可挂回）。"""
-    return {"items": ocr_jobs.manager.list_recent(limit=limit)}
+    return {"items": ocr_jobs.manager.list_recent(limit=limit, user_id=current_user.id)}
+
 
 
 @router.post("/ocr/jobs/{job_id}/cancel")
-async def cancel_ocr_job(job_id: str) -> dict[str, Any]:
+async def cancel_ocr_job(
+    job_id: str,
+    current_user: models.User = Depends(get_current_user),
+) -> dict[str, Any]:
+
     """请求取消某个 OCR 任务。
 
     - 立即设置 cancel_event：未开始的图片直接跳过、正在跑的图主动 close 流式连接
@@ -369,9 +408,10 @@ async def cancel_ocr_job(job_id: str) -> dict[str, Any]:
     OCR 任务在同一个事件循环上 set，行为最确定。
     """
     job = ocr_jobs.manager.get(job_id)
-    if not job:
+    if not job or getattr(job, "user_id", None) != current_user.id:
         print(f"[ocr-cancel] job {job_id} 不存在或已过期")
         raise HTTPException(404, f"job {job_id} 不存在或已过期")
+
     if job.status in ("done", "error", "cancelled"):
         print(f"[ocr-cancel] job {job_id} 已是终态 status={job.status}，无需取消")
         return {"ok": True, "already_finished": True, "status": job.status}
@@ -522,7 +562,9 @@ async def import_skill_json(
     files: list[UploadFile] = File(..., description="Skill 产物 JSON 文件，可多选"),
     platform_hint: str = Form("", description="平台提示，仅当 JSON 里没填 platform 时兜底"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ) -> dict[str, Any]:
+
     """吃 portfolio-ocr Skill 产物的 JSON 文件，返回 /ocr/parse 同结构。
 
     与 /ocr/parse 唯一的差别：跳过视觉模型环节。其余的候选匹配 + 建议动作完全一致。
@@ -587,7 +629,8 @@ async def import_skill_json(
     # 自动补码（默认开，可配置关）：与 OCR 路径一致的严格超时 (单条 3s/整批 5s)；
     # 用户不想自动查码可以在"设置 → 视觉模型"里把 auto_fill_code 关掉。
     from ..services import settings_service
-    vcfg = settings_service.get(db, "vision") or {}
+    vcfg = settings_service.get(db, "vision", user_id=current_user.id) or {}
+
     if vcfg.get("auto_fill_code", True):
         from ..services.ocr_jobs import _auto_fill_fund_codes
         async def _silent_log(msg: str):  # JSON 导入路径没有 SSE，日志直接吞掉
@@ -600,11 +643,12 @@ async def import_skill_json(
     for r in raw_results:
         items = r.get("items") or []
         for it in items:
-            cands = _match_candidates(db, it, r.get("platform") or platform_hint)
+            cands = _match_candidates(db, it, r.get("platform") or platform_hint, current_user.id)
             top = cands[0] if cands else None
-            suggestion = _suggest_action(it, top, db)
+            suggestion = _suggest_action(it, top, db, current_user.id)
             it["_candidates"] = cands
             it["_suggestion"] = suggestion
+
         out.append({
             "file": r.get("file", ""),
             "platform": r.get("platform"),
@@ -699,7 +743,9 @@ class CommitRequest(BaseModel):
 def commit_decisions(
     payload: CommitRequest,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ) -> dict[str, Any]:
+
     """事务性写入用户确认后的导入决策。"""
     created = 0
     appended = 0
@@ -762,7 +808,9 @@ def commit_decisions(
                         note = (note + " | " if note else "") + f"交易所:{exchange}"
                     asset = models.Asset(
 
+                        user_id=current_user.id,
                         name=it.name, code=code, asset_type=a_enum, market=m_enum,
+
                         platform=it.platform or "", note=note,
                         yield_7d=it.yield_7d, expected_apr=it.expected_apr,
                         start_date=_to_datetime(it.start_date),
@@ -794,9 +842,10 @@ def commit_decisions(
                     if not it.asset_id:
                         errors.append(f"#{idx} 追加失败：缺少 asset_id")
                         continue
-                    asset = db.get(models.Asset, it.asset_id)
+                    asset = db.query(models.Asset).filter_by(id=it.asset_id, user_id=current_user.id).first()
                     if not asset:
                         errors.append(f"#{idx} 资产 #{it.asset_id} 不存在")
+
                         continue
                     delta = abs(it.delta_shares or 0)
                     if delta <= 0:
@@ -824,9 +873,10 @@ def commit_decisions(
                     if not it.asset_id:
                         errors.append(f"#{idx} 更新失败：缺少 asset_id")
                         continue
-                    asset = db.get(models.Asset, it.asset_id)
+                    asset = db.query(models.Asset).filter_by(id=it.asset_id, user_id=current_user.id).first()
                     if not asset:
                         errors.append(f"#{idx} 资产 #{it.asset_id} 不存在")
+
                         continue
                     if it.principal_amount is not None:
                         asset.principal_amount = it.principal_amount

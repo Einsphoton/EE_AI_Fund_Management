@@ -43,6 +43,8 @@ class OcrJob:
     subscribers: list[asyncio.Queue] = field(default_factory=list)
     # 取消信号：用户点"停止识别"时 set，后台任务/视觉模型流式循环都监听这个
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    user_id: Optional[int] = None
+
 
     def snapshot(self) -> dict:
         """前端首次拉取 / 列表展示用的概要。"""
@@ -58,6 +60,8 @@ class OcrJob:
             "finished_at": self.finished_at,
             "has_result": self.result is not None,
             "cancelled": self.cancel_event.is_set(),
+            "user_id": self.user_id,
+
         }
 
 
@@ -66,23 +70,29 @@ class _JobManager:
         self._jobs: dict[str, OcrJob] = {}
         self._lock = asyncio.Lock()
 
-    def create(self, *, total: int, platform_hint: str, file_names: list[str]) -> OcrJob:
+    def create(self, *, total: int, platform_hint: str, file_names: list[str], user_id: int | None = None) -> OcrJob:
+
         job_id = uuid.uuid4().hex[:12]
         job = OcrJob(
             job_id=job_id,
             total=total,
             platform_hint=platform_hint,
             file_names=file_names,
+            user_id=user_id,
         )
+
         self._jobs[job_id] = job
         return job
 
     def get(self, job_id: str) -> Optional[OcrJob]:
         return self._jobs.get(job_id)
 
-    def list_recent(self, limit: int = 10) -> list[dict]:
+    def list_recent(self, limit: int = 10, user_id: int | None = None) -> list[dict]:
         items = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+        if user_id is not None:
+            items = [j for j in items if j.user_id == user_id]
         return [j.snapshot() for j in items[:limit]]
+
 
     def gc(self) -> None:
         """清理超过 TTL 的已完成任务。"""
@@ -236,7 +246,9 @@ async def run_parse_job(
     db_factory,
     match_fn,
     suggest_fn,
+    user_id: int | None = None,
 ):
+
     """后台跑视觉模型 + 候选匹配。
 
     Parameters
@@ -262,9 +274,10 @@ async def run_parse_job(
         from ..services import settings_service
         db_probe = db_factory()
         try:
-            cfg = settings_service.get(db_probe, "vision") or {}
+            cfg = settings_service.get(db_probe, "vision", user_id=user_id) or {}
             if cfg.get("use_ai"):
-                ai = settings_service.get(db_probe, "ai") or {}
+                ai = settings_service.get(db_probe, "ai", user_id=user_id) or {}
+
                 cfg = {**cfg, "model": ai.get("model"), "_use_ai": True}
         finally:
             db_probe.close()
@@ -523,10 +536,12 @@ async def run_parse_job(
                     t_match = time.time()
                     hits = 0
                     for it in items:
-                        cands = match_fn(db, it, r.get("platform") or hint)
+                        cands = match_fn(db, it, r.get("platform") or hint, user_id)
                         top = cands[0] if cands else None
-                        suggestion = suggest_fn(it, top, db)
+                        suggestion = suggest_fn(it, top, db, user_id)
+
                         it["_candidates"] = cands
+
                         it["_suggestion"] = suggestion
                         if top:
                             hits += 1

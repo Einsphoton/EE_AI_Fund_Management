@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
+from ..auth import get_current_user
 from ..database import get_db
+
 from ..services import quotes as quotes_service
 from ..services import holdings as holding_service
 from ..services import settings_service
@@ -33,15 +35,30 @@ def _to_enum(asset_type: str, market: str):
 
 
 @router.get("", response_model=List[schemas.AssetOut])
-def list_assets(db: Session = Depends(get_db)):
-    return db.query(models.Asset).order_by(models.Asset.created_at.desc()).all()
+def list_assets(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return (
+        db.query(models.Asset)
+        .filter(models.Asset.user_id == current_user.id)
+        .order_by(models.Asset.created_at.desc())
+        .all()
+    )
 
 
 @router.post("", response_model=schemas.AssetOut)
-def create_asset(payload: schemas.AssetCreate, db: Session = Depends(get_db)):
+def create_asset(
+    payload: schemas.AssetCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+
     a, m = _to_enum(payload.asset_type, payload.market)
     asset = models.Asset(
+        user_id=current_user.id,
         name=payload.name, code=payload.code, asset_type=a, market=m,
+
         platform=payload.platform, note=payload.note,
         watch_only=payload.watch_only,
         target_source=payload.target_source or "manual",
@@ -91,10 +108,12 @@ def create_asset(payload: schemas.AssetCreate, db: Session = Depends(get_db)):
 async def ai_create_targets(
     limit: int = Query(5, ge=1, le=20),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """让 AI 根据投资性格和预算，更新/新增“我的标的”中的 AI 推荐标的。"""
     try:
-        return await recommend_ai_targets(db, limit=limit)
+        return await recommend_ai_targets(db, limit=limit, user_id=current_user.id)
+
     except TargetRecommendationError as e:
         raise HTTPException(400, str(e))
 
@@ -105,7 +124,11 @@ async def lookup_code(
     asset_type: str = "fund",
     use_llm_fallback: bool = False,   # 默认 off：LLM 没联网时容易瞎猜，反而误导用户
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+    void_user = current_user
+    del void_user
+
     """无状态查代码：根据基金/ETF 名直接返回建议代码，不依赖已存在的 asset。
 
     主要用于 OCR 对账表"代码缺失"行的实时补全，用户在确认入库前就能看到代码。
@@ -134,9 +157,13 @@ async def lookup_code(
 
 
 @router.get("/realized-pnl", response_model=schemas.RealizedPnlResponse)
-def list_realized_pnl(db: Session = Depends(get_db)):
+def list_realized_pnl(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """列出所有由卖出操作产生的已实现营收 / 盈亏明细。"""
-    assets = db.query(models.Asset).all()
+    assets = db.query(models.Asset).filter(models.Asset.user_id == current_user.id).all()
+
     items: list[dict] = []
     for asset in assets:
         items.extend(holding_service.realized_pnl_events(asset))
@@ -147,16 +174,27 @@ def list_realized_pnl(db: Session = Depends(get_db)):
 
 @router.get("/{asset_id}", response_model=schemas.AssetOut)
 
-def get_asset(asset_id: int, db: Session = Depends(get_db)):
-    asset = db.get(models.Asset, asset_id)
+def get_asset(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     return asset
 
 
 @router.patch("/{asset_id}", response_model=schemas.AssetOut)
-def update_asset(asset_id: int, payload: schemas.AssetUpdate, db: Session = Depends(get_db)):
-    asset = db.get(models.Asset, asset_id)
+def update_asset(
+    asset_id: int,
+    payload: schemas.AssetUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     data = payload.model_dump(exclude_unset=True)
@@ -178,8 +216,13 @@ def update_asset(asset_id: int, payload: schemas.AssetUpdate, db: Session = Depe
 
 
 @router.delete("/{asset_id}")
-def delete_asset(asset_id: int, db: Session = Depends(get_db)):
-    asset = db.get(models.Asset, asset_id)
+def delete_asset(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     db.delete(asset)
@@ -195,7 +238,9 @@ async def enrich_asset_endpoint(
     apply: bool = True,                # False = 仅返回建议不写库（前端预览用）
     use_llm_fallback: bool = True,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+
     """通用资产字段补全（目前主要用于 OCR 导入后补 fund 代码）。
 
     流程：
@@ -206,8 +251,12 @@ async def enrich_asset_endpoint(
 
     返回结构见 enrichment.enrich_asset() 文档。
     """
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+    if not asset:
+        raise HTTPException(404, "asset not found")
     from ..services.enrichment import enrich_asset
     field_list = None
+
     if fields:
         field_list = [f.strip() for f in fields.split(",") if f.strip()]
     result = await enrich_asset(
@@ -226,16 +275,27 @@ async def enrich_asset_endpoint(
 
 # -------------- transactions --------------
 @router.get("/{asset_id}/transactions", response_model=List[schemas.TransactionOut])
-def list_transactions(asset_id: int, db: Session = Depends(get_db)):
-    asset = db.get(models.Asset, asset_id)
+def list_transactions(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     return asset.transactions
 
 
 @router.post("/{asset_id}/transactions", response_model=schemas.TransactionOut)
-def create_txn(asset_id: int, payload: schemas.TransactionCreate, db: Session = Depends(get_db)):
-    asset = db.get(models.Asset, asset_id)
+def create_txn(
+    asset_id: int,
+    payload: schemas.TransactionCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     try:
@@ -265,10 +325,20 @@ def create_txn(asset_id: int, payload: schemas.TransactionCreate, db: Session = 
 
 
 @router.patch("/{asset_id}/transactions/{txn_id}", response_model=schemas.TransactionOut)
-def update_txn(asset_id: int, txn_id: int, payload: schemas.TransactionUpdate, db: Session = Depends(get_db)):
+def update_txn(
+    asset_id: int,
+    txn_id: int,
+    payload: schemas.TransactionUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+    if not asset:
+        raise HTTPException(404, "asset not found")
     txn = db.get(models.Transaction, txn_id)
     if not txn or txn.asset_id != asset_id:
         raise HTTPException(404, "txn not found")
+
     data = payload.model_dump(exclude_unset=True)
     if "txn_type" in data:
         try:
@@ -283,10 +353,19 @@ def update_txn(asset_id: int, txn_id: int, payload: schemas.TransactionUpdate, d
 
 
 @router.delete("/{asset_id}/transactions/{txn_id}")
-def delete_txn(asset_id: int, txn_id: int, db: Session = Depends(get_db)):
+def delete_txn(
+    asset_id: int,
+    txn_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+    if not asset:
+        raise HTTPException(404, "asset not found")
     txn = db.get(models.Transaction, txn_id)
     if not txn or txn.asset_id != asset_id:
         raise HTTPException(404, "txn not found")
+
     db.delete(txn)
     db.commit()
     return {"ok": True}
@@ -294,12 +373,17 @@ def delete_txn(asset_id: int, txn_id: int, db: Session = Depends(get_db)):
 
 # -------------- holdings summary --------------
 @router.get("/summary/all")
-async def list_holdings(db: Session = Depends(get_db)):
+async def list_holdings(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """并发拉取所有资产以及标的实时价，避免 N 次串行 HTTP."""
     import asyncio
 
-    assets = db.query(models.Asset).all()
-    quote_sources = settings_service.get(db, "quote_sources") or {}
+    assets = db.query(models.Asset).filter(models.Asset.user_id == current_user.id).all()
+
+    quote_sources = settings_service.get(db, "quote_sources", user_id=current_user.id) or {}
+
 
     async def _safe_price(a: models.Asset) -> float | None:
         try:

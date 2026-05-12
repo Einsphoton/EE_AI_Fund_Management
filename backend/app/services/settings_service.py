@@ -1,8 +1,10 @@
 """KV settings helper."""
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 from sqlalchemy.orm import Session
+
 
 from .. import models
 
@@ -160,26 +162,52 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-def get(db: Session, key: str) -> Any:
-    row = db.query(models.AppSetting).filter_by(key=key).first()
+def current_user_id(db: Session, user_id: int | None = None) -> int | None:
+    if user_id is not None:
+        return user_id
+    try:
+        uid = db.info.get("user_id")
+        return int(uid) if uid is not None else None
+    except Exception:
+        return None
+
+
+def scoped_key(key: str, user_id: int | None) -> str:
+    return f"u:{user_id}:{key}" if user_id else key
+
+
+def get(db: Session, key: str, user_id: int | None = None) -> Any:
+    uid = current_user_id(db, user_id)
+    row = db.query(models.AppSetting).filter_by(key=scoped_key(key, uid)).first()
     if row is None:
-        return DEFAULTS.get(key)
+        return deepcopy(DEFAULTS.get(key))
     return row.value
 
 
-def get_all(db: Session) -> dict[str, Any]:
-    out = {**DEFAULTS}
+def get_all(db: Session, user_id: int | None = None) -> dict[str, Any]:
+    uid = current_user_id(db, user_id)
+    out = deepcopy(DEFAULTS)
+    if uid:
+        prefix = f"u:{uid}:"
+        rows = db.query(models.AppSetting).filter(models.AppSetting.key.startswith(prefix)).all()
+        for row in rows:
+            out[row.key[len(prefix):]] = row.value
+        return out
     for row in db.query(models.AppSetting).all():
-        out[row.key] = row.value
+        if not str(row.key).startswith("u:"):
+            out[row.key] = row.value
     return out
 
 
-def set_value(db: Session, key: str, value: Any) -> Any:
-    row = db.query(models.AppSetting).filter_by(key=key).first()
+def set_value(db: Session, key: str, value: Any, user_id: int | None = None) -> Any:
+    uid = current_user_id(db, user_id)
+    target_key = scoped_key(key, uid)
+    row = db.query(models.AppSetting).filter_by(key=target_key).first()
     if row is None:
-        row = models.AppSetting(key=key, value=value)
+        row = models.AppSetting(key=target_key, value=value)
         db.add(row)
     else:
         row.value = value
     db.commit()
     return value
+

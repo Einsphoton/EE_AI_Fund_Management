@@ -58,7 +58,9 @@ export type TxnType = "buy" | "sell";
 
 export interface Asset {
   id: number;
+  user_id?: number | null;
   name: string;
+
   code: string;
   asset_type: AssetType;
   market: Market;
@@ -393,8 +395,28 @@ export interface ProfilesResponse {
   report_styles: ProfileOption[];
 }
 
+export interface AuthUser {
+  id: number;
+  username: string;
+  email?: string | null;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: AuthUser;
+}
+
 // ---------- endpoints ----------
+export const AuthApi = {
+  register: (username: string, password: string, email?: string) =>
+    api.post<AuthResponse>("/auth/register", { username, password, email: email || undefined }).then((r) => r.data),
+  login: (username: string, password: string) =>
+    api.post<AuthResponse>("/auth/login", { username, password }).then((r) => r.data),
+  me: () => api.get<AuthUser>("/auth/me").then((r) => r.data),
+};
+
 export const Assets = {
+
   list: () => api.get<Asset[]>("/assets").then((r) => r.data),
   create: (p: any) => api.post<Asset>("/assets", p).then((r) => r.data),
   aiTargets: (limit = 5) => api.post<Asset[]>("/assets/ai-targets", null, { params: { limit } }).then((r) => r.data),
@@ -591,11 +613,13 @@ export async function runAllStream(
   onEvent: (evt: RunAllEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  const token = localStorage.getItem("ee_auth_token") || "";
   const resp = await fetch("/api/advice/run-all/stream", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     signal,
   });
+
   if (!resp.ok || !resp.body) {
     throw new Error(`run-all stream failed: ${resp.status}`);
   }
@@ -757,12 +781,14 @@ export async function chatStream(
   onToken: (t: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  const token = localStorage.getItem("ee_auth_token") || "";
   const resp = await fetch("/api/chat/stream", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({ messages }),
     signal,
   });
+
   if (!resp.ok || !resp.body) {
     throw new Error(`chat failed: ${resp.status}`);
   }

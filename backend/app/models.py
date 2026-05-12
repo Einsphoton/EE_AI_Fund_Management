@@ -41,11 +41,28 @@ class TxnType(str, enum.Enum):
     sell = "sell"
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    username = Column(String(32), unique=True, nullable=False, index=True)
+    email = Column(String(255), unique=True, nullable=True, index=True)
+    password_hash = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=now_local)
+    updated_at = Column(DateTime, default=now_local, onupdate=now_local)
+
+    assets = relationship("Asset", back_populates="user")
+
+
 class Asset(Base):
+
     __tablename__ = "assets"
 
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     name = Column(String(128), nullable=False)
+
     code = Column(String(32), nullable=False, index=True)        # 基金代码 / 股票代码 / 理财产品编号
     # native_enum=False：VARCHAR 存储，方便扩展新枚举值无需迁移
     asset_type = Column(Enum(AssetType, native_enum=False, length=16), nullable=False)
@@ -72,7 +89,9 @@ class Asset(Base):
     created_at = Column(DateTime, default=now_local)
     updated_at = Column(DateTime, default=now_local, onupdate=now_local)
 
+    user = relationship("User", back_populates="assets")
     transactions = relationship(
+
         "Transaction", back_populates="asset",
         cascade="all, delete-orphan", order_by="Transaction.trade_date.asc()",
     )

@@ -22,8 +22,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from ..auth import get_current_user
 from ..database import get_db, engine
-from .. import scheduler as scheduler_mod
+from .. import models, scheduler as scheduler_mod
+
 from ..services import backup as backup_service
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -77,7 +79,9 @@ def wipe_all_data(
     confirm: str,
     include_settings: bool = False,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+
     """**危险操作**：清空数据库里的业务数据。
 
     Parameters
@@ -105,16 +109,21 @@ def wipe_all_data(
         pass
 
     deleted: dict[str, int] = {}
-    targets = list(_BIZ_TABLES)
-    if include_settings:
-        targets.extend(_SETTINGS_TABLES)
 
     # 注意顺序：transactions / snapshots / advices 都依赖 assets，先清子表再清父表
-    # 即便外键不是 ON DELETE CASCADE 也不会因外键约束失败
+    # 当前账号隔离：只清理 current_user.id 名下的数据。
     try:
-        for t in targets:
-            deleted[t] = _truncate_table(db, t)
+        uid = current_user.id
+        asset_ids = [r[0] for r in db.query(models.Asset.id).filter(models.Asset.user_id == uid).all()]
+        deleted["transactions"] = db.query(models.Transaction).filter(models.Transaction.asset_id.in_(asset_ids)).delete(synchronize_session=False) if asset_ids else 0
+        deleted["holding_snapshots"] = db.query(models.HoldingSnapshot).filter(models.HoldingSnapshot.asset_id.in_(asset_ids)).delete(synchronize_session=False) if asset_ids else 0
+        deleted["advices"] = db.query(models.Advice).filter(models.Advice.asset_id.in_(asset_ids)).delete(synchronize_session=False) if asset_ids else 0
+        deleted["todo_items"] = db.query(models.TodoItem).filter(models.TodoItem.asset_id.in_(asset_ids)).delete(synchronize_session=False) if asset_ids else 0
+        deleted["assets"] = db.query(models.Asset).filter(models.Asset.user_id == uid).delete(synchronize_session=False)
+        if include_settings:
+            deleted["app_settings"] = db.query(models.AppSetting).filter(models.AppSetting.key.startswith(f"u:{uid}:")).delete(synchronize_session=False)
         db.commit()
+
     except Exception as e:
         db.rollback()
         raise HTTPException(500, f"清空过程出错：{type(e).__name__}: {e}")
@@ -156,7 +165,9 @@ def export_data(
     include_snapshots: bool = True,
     include_settings: bool = False,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+
     """导出所有资产数据。
 
 
@@ -172,7 +183,9 @@ def export_data(
             db,
             include_snapshots=include_snapshots,
             include_settings=include_settings,
+            user_id=current_user.id,
         )
+
         body = json.dumps(data, ensure_ascii=False, indent=2)
 
         # 用 PlainTextResponse + JSON content-type；直接 JSONResponse 会被 FastAPI 去掉
@@ -187,7 +200,8 @@ def export_data(
 
         )
     elif format == "csv":
-        body = backup_service.export_csv_assets(db)
+        body = backup_service.export_csv_assets(db, user_id=current_user.id)
+
         return PlainTextResponse(
             content=body,
             media_type="text/csv; charset=utf-8",
@@ -201,10 +215,15 @@ def export_data(
 
 
 @router.get("/export/transactions.csv")
-def export_transactions_csv(db: Session = Depends(get_db)):
+def export_transactions_csv(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+
     """单独导出交易流水 CSV（扁平，便于 Excel 筛选）。"""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    body = backup_service.export_csv_transactions(db)
+    body = backup_service.export_csv_transactions(db, user_id=current_user.id)
+
     return PlainTextResponse(
         content=body,
         media_type="text/csv; charset=utf-8",
@@ -228,9 +247,11 @@ async def import_data(
     include_settings: bool = Form(False),
     confirm: str = Form("", description="mode=replace 必填 I_UNDERSTAND_REPLACE_ALL"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
 
     """从导出的 JSON 文件恢复资产数据。
+
 
     mode:
       - `merge`（默认，推荐）：按 (asset_type, code) 键合并。
@@ -277,7 +298,9 @@ async def import_data(
         include_transactions=include_transactions,
         include_snapshots=include_snapshots,
         include_settings=include_settings,
+        user_id=current_user.id,
     )
+
 
 
     return JSONResponse(content=result.to_dict())

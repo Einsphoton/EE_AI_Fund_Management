@@ -65,16 +65,21 @@ def _month_start(dt: datetime) -> datetime:
     return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
-def expire_pending_todos(db: Session) -> int:
+def expire_pending_todos(db: Session, user_id: int | None = None) -> int:
+
     """把已过期且未处理的 To-do 自动标记为不采纳。"""
     now = now_local()
+    q = db.query(models.TodoItem)
+    if user_id is not None:
+        q = q.join(models.Asset, models.Asset.id == models.TodoItem.asset_id)
+        q = q.filter(models.Asset.user_id == user_id)
     expired = (
-        db.query(models.TodoItem)
-        .filter(models.TodoItem.status == "pending")
+        q.filter(models.TodoItem.status == "pending")
         .filter(models.TodoItem.expires_at.isnot(None))
         .filter(models.TodoItem.expires_at <= now)
         .all()
     )
+
     for todo in expired:
         todo.status = "rejected"
         todo.resolved_at = now
@@ -88,8 +93,9 @@ def expire_pending_todos(db: Session) -> int:
     return len(expired)
 
 
-def _budget_items(db: Session) -> list[dict[str, Any]]:
-    cfg = settings_service.get(db, "investment_budget") or {}
+def _budget_items(db: Session, user_id: int | None = None) -> list[dict[str, Any]]:
+    cfg = settings_service.get(db, "investment_budget", user_id=user_id) or {}
+
     raw = cfg.get("items") if isinstance(cfg, dict) else []
     items: list[dict[str, Any]] = []
     for it in raw or []:
@@ -117,7 +123,8 @@ def _budget_items(db: Session) -> list[dict[str, Any]]:
     return items
 
 
-def _spent_this_month(db: Session, budgets: list[dict[str, Any]]) -> dict[tuple[str, str, str], float]:
+def _spent_this_month(db: Session, budgets: list[dict[str, Any]], user_id: int | None = None) -> dict[tuple[str, str, str], float]:
+
     start = _month_start(now_local())
     keys = {
         (b["platform"], b["currency"], asset_type)
@@ -125,13 +132,16 @@ def _spent_this_month(db: Session, budgets: list[dict[str, Any]]) -> dict[tuple[
         for asset_type in b.get("asset_types", [])
     }
     spent = {k: 0.0 for k in keys}
-    txns = (
+    q = (
         db.query(models.Transaction)
         .join(models.Asset, models.Asset.id == models.Transaction.asset_id)
         .filter(models.Transaction.trade_date >= start)
         .filter(models.Transaction.txn_type == models.TxnType.buy)
-        .all()
     )
+    if user_id is not None:
+        q = q.filter(models.Asset.user_id == user_id)
+    txns = q.all()
+
     for t in txns:
         asset = t.asset
         if not asset:
@@ -145,9 +155,13 @@ def _spent_this_month(db: Session, budgets: list[dict[str, Any]]) -> dict[tuple[
     return spent
 
 
-async def _portfolio_rows(db: Session) -> list[dict[str, Any]]:
-    assets = db.query(models.Asset).all()
-    quote_sources = settings_service.get(db, "quote_sources") or {}
+async def _portfolio_rows(db: Session, user_id: int | None = None) -> list[dict[str, Any]]:
+    q = db.query(models.Asset)
+    if user_id is not None:
+        q = q.filter(models.Asset.user_id == user_id)
+    assets = q.all()
+    quote_sources = settings_service.get(db, "quote_sources", user_id=user_id) or {}
+
 
     async def _price(a: models.Asset) -> float | None:
         try:
@@ -218,10 +232,11 @@ def _fallback_actions(rows: list[dict[str, Any]], budget_status: list[dict[str, 
     return {"summary": "AI 暂不可用，已按保守规则生成少量待确认动作。", "actions": actions[:5]}
 
 
-def get_budget_status(db: Session) -> list[dict[str, Any]]:
+def get_budget_status(db: Session, user_id: int | None = None) -> list[dict[str, Any]]:
     """返回每个平台/币种/资产类型预算的本月已用与剩余。"""
-    budgets = _budget_items(db)
-    spent = _spent_this_month(db, budgets)
+    budgets = _budget_items(db, user_id=user_id)
+    spent = _spent_this_month(db, budgets, user_id=user_id)
+
     budget_status: list[dict[str, Any]] = []
     for b in budgets:
         used = round(sum(
@@ -237,21 +252,26 @@ def get_budget_status(db: Session) -> list[dict[str, Any]]:
     return budget_status
 
 
-async def run_investment_manager(db: Session) -> dict[str, Any]:
-    expire_pending_todos(db)
-    budgets = _budget_items(db)
+async def run_investment_manager(db: Session, user_id: int | None = None) -> dict[str, Any]:
+    expire_pending_todos(db, user_id=user_id)
+    budgets = _budget_items(db, user_id=user_id)
+
     if not budgets:
         return {"summary": "尚未配置平台月投资额度，无法生成投资经理建议。", "created": 0, "todos": [], "budget_status": []}
 
-    budget_status = get_budget_status(db)
+    budget_status = get_budget_status(db, user_id=user_id)
 
-    rows = await _portfolio_rows(db)
-    pending_todos = (
+    rows = await _portfolio_rows(db, user_id=user_id)
+    pending_q = (
         db.query(models.TodoItem)
         .filter(models.TodoItem.status == "pending")
         .filter(models.TodoItem.asset_id.isnot(None))
-        .all()
     )
+    if user_id is not None:
+        pending_q = pending_q.join(models.Asset, models.Asset.id == models.TodoItem.asset_id)
+        pending_q = pending_q.filter(models.Asset.user_id == user_id)
+    pending_todos = pending_q.all()
+
     pending_asset_ids = {int(t.asset_id) for t in pending_todos if t.asset_id is not None}
     pending_todo_context = [
         {
@@ -263,7 +283,8 @@ async def run_investment_manager(db: Session) -> dict[str, Any]:
         }
         for t in pending_todos
     ]
-    ai_cfg = settings_service.get(db, "ai") or {}
+    ai_cfg = settings_service.get(db, "ai", user_id=user_id) or {}
+
     profile_id = ai_cfg.get("investor_profile")
     profile_meta = get_profile_public(profile_id)
     profile_prompt = get_profile_prompt(profile_id) or get_profile_prompt(profile_meta.get("id"))

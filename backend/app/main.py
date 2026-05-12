@@ -39,6 +39,8 @@ from .api import import_api
 from .api import enrich as enrich_api
 from .api import admin as admin_api
 from .api import update_api
+from .api import auth_api
+
 
 
 @asynccontextmanager
@@ -96,6 +98,8 @@ app.include_router(import_api.router)
 app.include_router(enrich_api.router)
 app.include_router(admin_api.router)
 app.include_router(update_api.router)
+app.include_router(auth_api.router)
+
 
 
 

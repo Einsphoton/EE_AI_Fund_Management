@@ -5,7 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..auth import get_current_user
 from ..database import get_db
+
 from ..services import quotes as quotes_service
 from ..services import snapshot as snapshot_service
 from ..services import settings_service
@@ -19,8 +21,10 @@ async def asset_quote(
     asset_id: int,
     days: int = Query(365, ge=7, le=4000),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    asset = db.get(models.Asset, asset_id)
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     quote_sources = settings_service.get(db, "quote_sources") or {}
@@ -59,13 +63,19 @@ async def asset_quote(
 
 
 @router.get("/asset/{asset_id}/snapshot")
-async def asset_snapshot(asset_id: int, db: Session = Depends(get_db)):
+async def asset_snapshot(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+
     """基本盘 / 关键指标。仅股票 / 港股 / 美股 / 场内 ETF 有效。
 
     公开行情源偶发返回异常/空响应时，不能让详情页因为基本盘面板 500。
     这里降级为空对象，并把错误信息带回前端排查。
     """
-    asset = db.get(models.Asset, asset_id)
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     try:
@@ -90,7 +100,10 @@ async def raw_quote(
     market: str = "A",
     days: int = Query(180, ge=7, le=4000),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+    del current_user
+
     """无需创建标的也可以预览行情，便于前端在添加时校验代码。"""
     quote_sources = settings_service.get(db, "quote_sources") or {}
     quote = await quotes_service.fetch_quote(asset_type, market, code, days=days, quote_sources=quote_sources)

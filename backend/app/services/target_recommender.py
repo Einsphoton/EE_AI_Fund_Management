@@ -59,13 +59,15 @@ def _is_ai_target(asset: models.Asset) -> bool:
     return bool(asset.watch_only) and (source == "ai" or note.startswith("AI加入标的池") or note.startswith("AI推荐标的"))
 
 
-async def recommend_ai_targets(db: Session, limit: int = 5) -> list[models.Asset]:
+async def recommend_ai_targets(db: Session, limit: int = 5, user_id: int | None = None) -> list[models.Asset]:
+
     """Recommend targets and upsert existing AI-created watch-only targets.
 
     Existing AI targets are refreshed by matching `code + market + platform`; manual targets
     and holdings are never overwritten.
     """
-    ai_cfg = settings_service.get(db, "ai") or {}
+    ai_cfg = settings_service.get(db, "ai", user_id=user_id) or {}
+
     base_url = ai_cfg.get("base_url") or ""
     api_key = ai_cfg.get("api_key") or ""
     if not base_url or not api_key:
@@ -74,7 +76,8 @@ async def recommend_ai_targets(db: Session, limit: int = 5) -> list[models.Asset
     profile_id = ai_cfg.get("investor_profile")
     profile_meta = get_profile_public(profile_id)
     profile_prompt = get_profile_prompt(profile_id) or get_profile_prompt(profile_meta.get("id"))
-    budget_status = get_budget_status(db)
+    budget_status = get_budget_status(db, user_id=user_id)
+
     allowed_pairs = [
         {
             "platform": b.get("platform"),
@@ -88,7 +91,11 @@ async def recommend_ai_targets(db: Session, limit: int = 5) -> list[models.Asset
     if not allowed_pairs:
         raise TargetRecommendationError("请先在设置中配置有剩余额度的平台月投资预算")
 
-    assets = db.query(models.Asset).all()
+    assets_q = db.query(models.Asset)
+    if user_id is not None:
+        assets_q = assets_q.filter(models.Asset.user_id == user_id)
+    assets = assets_q.all()
+
     existing = [
         {
             "id": a.id,
@@ -182,7 +189,9 @@ async def recommend_ai_targets(db: Session, limit: int = 5) -> list[models.Asset
             continue
 
         asset = models.Asset(
+            user_id=user_id,
             name=name,
+
             code=code,
             asset_type=a_type,
             market=mkt,

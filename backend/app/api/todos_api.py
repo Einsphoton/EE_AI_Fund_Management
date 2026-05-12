@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
+from ..auth import get_current_user
 from ..database import get_db
+
 from ..services.investment_manager import expire_pending_todos, get_budget_status, run_investment_manager
 from ..tz import now_local
 
@@ -15,16 +17,24 @@ router = APIRouter(prefix="/api/todos", tags=["todos"])
 
 
 @router.get("/budget-status")
-def budget_status(db: Session = Depends(get_db)):
+def budget_status(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """列出各平台/币种/资产类型的本月剩余预算。"""
-    expire_pending_todos(db)
-    return {"items": get_budget_status(db)}
+    expire_pending_todos(db, user_id=current_user.id)
+    return {"items": get_budget_status(db, user_id=current_user.id)}
+
 
 
 @router.post("/ai-investment-plan", response_model=schemas.InvestmentManagerRunOut)
-async def run_ai_investment_plan(db: Session = Depends(get_db)):
+async def run_ai_investment_plan(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """让 AI 投资经理基于投资性格 + 平台月预算生成待确认 To-do。"""
-    result = await run_investment_manager(db)
+    result = await run_investment_manager(db, user_id=current_user.id)
+
     return {
         "summary": result.get("summary", ""),
         "created": result.get("created", 0),
@@ -37,9 +47,12 @@ async def run_ai_investment_plan(db: Session = Depends(get_db)):
 def list_todos(
     status: str = Query("pending", description="pending | accepted | rejected | all"),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    expire_pending_todos(db)
-    q = db.query(models.TodoItem)
+    expire_pending_todos(db, user_id=current_user.id)
+    q = db.query(models.TodoItem).join(models.Asset, models.Asset.id == models.TodoItem.asset_id)
+    q = q.filter(models.Asset.user_id == current_user.id)
+
     if status != "all":
         q = q.filter(models.TodoItem.status == status)
     return q.order_by(models.TodoItem.due_date.asc(), models.TodoItem.created_at.desc()).all()
@@ -50,11 +63,18 @@ def resolve_todo(
     todo_id: int,
     payload: schemas.TodoResolvePayload,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    expire_pending_todos(db)
+    expire_pending_todos(db, user_id=current_user.id)
     todo = db.get(models.TodoItem, todo_id)
+
     if not todo:
         raise HTTPException(404, "todo not found")
+    if todo.asset_id:
+        owner_asset = db.query(models.Asset).filter_by(id=todo.asset_id, user_id=current_user.id).first()
+        if not owner_asset:
+            raise HTTPException(404, "todo not found")
+
     if todo.status != "pending":
         raise HTTPException(400, "todo already resolved")
 
@@ -74,7 +94,8 @@ def resolve_todo(
         raise HTTPException(400, f"todo type {todo.todo_type} cannot be accepted yet")
     if not todo.asset_id:
         raise HTTPException(400, "todo has no asset")
-    asset = db.get(models.Asset, todo.asset_id)
+    asset = db.query(models.Asset).filter_by(id=todo.asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
 

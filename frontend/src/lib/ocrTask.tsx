@@ -238,7 +238,13 @@ export function OcrTaskProvider({ children }: { children: ReactNode }) {
 
   /** 通过 fetch + getReader 订阅 SSE，保持跨 tab 的事件。 */
   const openStream = useCallback(async (jobId: string, signal: AbortSignal) => {
-    const resp = await fetch(`/api/import/ocr/jobs/${jobId}/stream`, { method: "GET", signal });
+    const token = localStorage.getItem("ee_auth_token") || "";
+    const resp = await fetch(`/api/import/ocr/jobs/${jobId}/stream`, {
+      method: "GET",
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      signal,
+    });
+
     if (!resp.ok || !resp.body) {
       throw new Error(`订阅 OCR 进度失败：${resp.status}`);
     }

@@ -80,10 +80,14 @@ def _extract_focus_codes(user_msg: str, all_codes: list[str], all_names: list[st
 
 
 # ---------- 上下文构建 ----------
-async def _collect_portfolio_rows(db: Session) -> tuple[list[dict[str, Any]], list[models.Asset]]:
-    assets: Iterable[models.Asset] = db.query(models.Asset).all()
+async def _collect_portfolio_rows(db: Session, user_id: int | None = None) -> tuple[list[dict[str, Any]], list[models.Asset]]:
+    assets_q = db.query(models.Asset)
+    if user_id is not None:
+        assets_q = assets_q.filter(models.Asset.user_id == user_id)
+    assets: Iterable[models.Asset] = assets_q.all()
     assets_list = list(assets)
-    quote_sources = settings_service.get(db, "quote_sources") or {}
+    quote_sources = settings_service.get(db, "quote_sources", user_id=user_id) or {}
+
 
     async def _safe_price(a: models.Asset) -> float | None:
         try:
@@ -168,8 +172,12 @@ def _render_full_rows(rows: list[dict[str, Any]], focus_ids: set[int] | None) ->
     return ["\n" + title, "```json", json.dumps(cleaned, ensure_ascii=False, indent=2), "```"]
 
 
-def _render_recent_advices(db: Session, focus_ids: set[int] | None, limit: int = 15) -> list[str]:
+def _render_recent_advices(db: Session, focus_ids: set[int] | None, limit: int = 15, user_id: int | None = None) -> list[str]:
     q = db.query(models.Advice)
+    if user_id is not None:
+        q = q.join(models.Asset, models.Asset.id == models.Advice.asset_id)
+        q = q.filter(models.Asset.user_id == user_id)
+
     if focus_ids:
         q = q.filter(models.Advice.asset_id.in_(list(focus_ids)))
     recent = q.order_by(models.Advice.created_at.desc()).limit(limit).all()
@@ -194,9 +202,12 @@ async def _build_portfolio_context(
     db: Session,
     user_msg: str,
     token_budget: int,
+    user_id: int | None = None,
 ) -> str:
+
     """按 token_budget 自适应构建 portfolio 上下文。"""
-    rows, assets_list = await _collect_portfolio_rows(db)
+    rows, assets_list = await _collect_portfolio_rows(db, user_id=user_id)
+
 
     skills = db.query(models.Skill).filter_by(enabled=True).all()
     skill_lines = [f"- {s.name} ({s.skill_id}): {s.description}" for s in skills]
@@ -215,7 +226,8 @@ async def _build_portfolio_context(
     tier_b = _render_full_rows(rows, focus_ids) if focus_ids else []
 
     # Tier C：聚焦标的最近建议（如果有聚焦） / 否则全局最近建议
-    tier_c = _render_recent_advices(db, focus_ids if focus_ids else None, limit=15)
+    tier_c = _render_recent_advices(db, focus_ids if focus_ids else None, limit=15, user_id=user_id)
+
 
     # Tier D：没有 focus 时的"全量完整明细"——只有预算足够才加
     tier_d = _render_full_rows(rows, None) if not focus_ids else []
@@ -329,13 +341,15 @@ def _llm_client(ai_cfg: dict[str, Any]) -> OpenAI | None:
     )
 
 
-async def stream_chat(db: Session, history: list[dict[str, str]]):
+async def stream_chat(db: Session, history: list[dict[str, str]], user_id: int | None = None):
+
     """Async generator yielding text deltas (SSE-style).
 
     history 形如 [{"role":"user|assistant","content":"..."}]
     最新一条必须是 user.
     """
-    ai_cfg = settings_service.get(db, "ai") or {}
+    ai_cfg = settings_service.get(db, "ai", user_id=user_id) or {}
+
     client = _llm_client(ai_cfg)
     if client is None:
         yield (
@@ -361,7 +375,8 @@ async def stream_chat(db: Session, history: list[dict[str, str]]):
     portfolio_budget = max(portfolio_budget, 2000)  # 至少给 2k，不然连精简表都放不下
 
     # --- 3) 构建 portfolio 上下文 + Skill prompts ---
-    portfolio_ctx = await _build_portfolio_context(db, latest_user, portfolio_budget)
+    portfolio_ctx = await _build_portfolio_context(db, latest_user, portfolio_budget, user_id=user_id)
+
 
     skill_prompts: list[str] = []
     for s in db.query(models.Skill).filter_by(enabled=True).all():

@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
+from ..auth import get_current_user
 from ..database import get_db
+
 from ..services import dca as dca_service
 from ..tz import now_local
 
@@ -20,8 +22,10 @@ async def suggest(
     base: float = Query(1000.0, ge=10.0, le=1_000_000.0),
     fee_rate: float = Query(0.001, ge=0.0, le=0.05),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
-    asset = db.get(models.Asset, asset_id)
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     if asset.asset_type != models.AssetType.fund:
@@ -36,9 +40,11 @@ async def create_dca_todo(
     base: float = Query(1000.0, ge=10.0, le=1_000_000.0),
     fee_rate: float = Query(0.001, ge=0.0, le=0.05),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     """把本期定投到期动作放入 To-do，等待用户确认是否采纳。"""
-    asset = db.get(models.Asset, asset_id)
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+
     if not asset:
         raise HTTPException(404, "asset not found")
     if asset.asset_type != models.AssetType.fund:

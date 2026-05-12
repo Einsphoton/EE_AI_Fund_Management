@@ -8,7 +8,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ..auth import get_current_user
 from ..database import get_db, SessionLocal
+from .. import models
+
 from ..services import chat as chat_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -24,7 +27,8 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/stream")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, current_user: models.User = Depends(get_current_user)):
+
     """SSE-style streaming response, content type text/event-stream.
 
     每行： data: <json-escaped-token>\n\n
@@ -37,7 +41,8 @@ async def chat_stream(req: ChatRequest):
         db = SessionLocal()
         try:
             import json as _json
-            async for token in chat_service.stream_chat(db, history):
+            async for token in chat_service.stream_chat(db, history, user_id=current_user.id):
+
                 yield f"data: {_json.dumps(token, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
@@ -47,10 +52,16 @@ async def chat_stream(req: ChatRequest):
 
 
 @router.post("/once")
-async def chat_once(req: ChatRequest, db: Session = Depends(get_db)):
+async def chat_once(
+    req: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+
     """Non-streaming variant, returns the whole text at once."""
     history = [m.model_dump() for m in req.messages]
     full = ""
-    async for tok in chat_service.stream_chat(db, history):
+    async for tok in chat_service.stream_chat(db, history, user_id=current_user.id):
+
         full += tok
     return {"content": full}

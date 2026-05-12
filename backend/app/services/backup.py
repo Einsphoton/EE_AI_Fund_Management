@@ -140,7 +140,8 @@ def _skill_to_dict(s: models.Skill) -> dict:
     }
 
 
-def export_json(db: Session, *, include_snapshots: bool = True, include_settings: bool = False) -> dict:
+def export_json(db: Session, *, include_snapshots: bool = True, include_settings: bool = False, user_id: int | None = None) -> dict:
+
     """导出所有资产 + 交易 + 可选快照为一份 JSON 文档。
 
 
@@ -161,7 +162,11 @@ def export_json(db: Session, *, include_snapshots: bool = True, include_settings
     }
     ```
     """
-    assets = db.query(models.Asset).order_by(models.Asset.id).all()
+    assets_q = db.query(models.Asset)
+    if user_id is not None:
+        assets_q = assets_q.filter(models.Asset.user_id == user_id)
+    assets = assets_q.order_by(models.Asset.id).all()
+
     out_assets: list[dict] = []
     total_txns = 0
     total_snaps = 0
@@ -186,7 +191,13 @@ def export_json(db: Session, *, include_snapshots: bool = True, include_settings
         },
     }
     if include_settings:
-        settings = db.query(models.AppSetting).order_by(models.AppSetting.key).all()
+        settings_q = db.query(models.AppSetting)
+        if user_id is not None:
+            settings_q = settings_q.filter(models.AppSetting.key.startswith(f"u:{user_id}:"))
+        else:
+            settings_q = settings_q.filter(~models.AppSetting.key.startswith("u:"))
+        settings = settings_q.order_by(models.AppSetting.key).all()
+
         skills = db.query(models.Skill).order_by(models.Skill.id).all()
         out["app_settings"] = [_setting_to_dict(s) for s in settings]
         out["skills"] = [_skill_to_dict(s) for s in skills]
@@ -196,7 +207,8 @@ def export_json(db: Session, *, include_snapshots: bool = True, include_settings
 
 
 
-def export_csv_assets(db: Session) -> str:
+def export_csv_assets(db: Session, user_id: int | None = None) -> str:
+
     """导出资产扁平表。交易请单独导 CSV。"""
     buf = io.StringIO()
     # utf-8-sig：让 Excel 打开 CSV 时中文不乱码（加 BOM）
@@ -209,7 +221,11 @@ def export_csv_assets(db: Session) -> str:
         "principal_amount", "is_principal_guaranteed",
         "created_at",
     ])
-    for a in db.query(models.Asset).order_by(models.Asset.id).all():
+    assets_q = db.query(models.Asset)
+    if user_id is not None:
+        assets_q = assets_q.filter(models.Asset.user_id == user_id)
+    for a in assets_q.order_by(models.Asset.id).all():
+
         w.writerow([
             a.name, a.code, a.asset_type.value, a.market.value,
             a.platform or "", a.note or "",
@@ -225,7 +241,8 @@ def export_csv_assets(db: Session) -> str:
     return buf.getvalue()
 
 
-def export_csv_transactions(db: Session) -> str:
+def export_csv_transactions(db: Session, user_id: int | None = None) -> str:
+
     """导出所有交易流水扁平表。"""
     buf = io.StringIO()
     buf.write("\ufeff")
@@ -235,12 +252,14 @@ def export_csv_transactions(db: Session) -> str:
         "txn_type", "shares", "price", "amount", "fee",
         "trade_date", "note",
     ])
-    txns = (
+    txns_q = (
         db.query(models.Transaction)
         .join(models.Asset, models.Transaction.asset_id == models.Asset.id)
-        .order_by(models.Transaction.trade_date.asc())
-        .all()
     )
+    if user_id is not None:
+        txns_q = txns_q.filter(models.Asset.user_id == user_id)
+    txns = txns_q.order_by(models.Transaction.trade_date.asc()).all()
+
     for t in txns:
         a = t.asset
         w.writerow([
@@ -285,7 +304,8 @@ class ImportResult:
 
 
 
-def _find_existing_asset(db: Session, asset_type: str, code: str) -> models.Asset | None:
+def _find_existing_asset(db: Session, asset_type: str, code: str, user_id: int | None = None) -> models.Asset | None:
+
     """按 (asset_type, code) 组合查找已存在的资产。code 为空时返回 None。"""
     if not code or not code.strip():
         return None
@@ -293,14 +313,14 @@ def _find_existing_asset(db: Session, asset_type: str, code: str) -> models.Asse
         at = models.AssetType(asset_type)
     except ValueError:
         return None
-    return (
-        db.query(models.Asset)
-        .filter(
-            models.Asset.asset_type == at,
-            models.Asset.code == code.strip(),
-        )
-        .first()
+    q = db.query(models.Asset).filter(
+        models.Asset.asset_type == at,
+        models.Asset.code == code.strip(),
     )
+    if user_id is not None:
+        q = q.filter(models.Asset.user_id == user_id)
+    return q.first()
+
 
 
 def _txn_dedupe_key(t_dict: dict) -> tuple:
@@ -326,7 +346,8 @@ def _snap_dedupe_key(s_dict: dict) -> tuple:
     )
 
 
-def _import_settings(db: Session, payload: dict, result: ImportResult) -> None:
+def _import_settings(db: Session, payload: dict, result: ImportResult, user_id: int | None = None) -> None:
+
     items = payload.get("app_settings") or []
     if not isinstance(items, list):
         result.errors.append("app_settings 结构非法，已跳过")
@@ -334,7 +355,14 @@ def _import_settings(db: Session, payload: dict, result: ImportResult) -> None:
     for item in items:
         if not isinstance(item, dict) or not item.get("key"):
             continue
-        key = str(item.get("key"))
+        raw_key = str(item.get("key"))
+        if user_id is not None and raw_key.startswith(f"u:{user_id}:"):
+            key = raw_key
+        elif user_id is not None:
+            key = f"u:{user_id}:{raw_key.split(':', 2)[-1] if raw_key.startswith('u:') else raw_key}"
+        else:
+            key = raw_key
+
         setting = db.get(models.AppSetting, key)
         if setting is None:
             db.add(models.AppSetting(
@@ -384,7 +412,9 @@ def import_json(
     include_transactions: bool = True,
     include_snapshots: bool = True,
     include_settings: bool = False,
+    user_id: int | None = None,
 ) -> ImportResult:
+
 
     """从 JSON 文档导入。
 
@@ -405,23 +435,35 @@ def import_json(
         from sqlalchemy import text
         try:
             before = {
-                "transactions": db.query(models.Transaction).count(),
-                "holding_snapshots": db.query(models.HoldingSnapshot).count(),
-                "advices": db.query(models.Advice).count(),
-                "todo_items": db.query(models.TodoItem).count(),
-                "assets": db.query(models.Asset).count(),
+                "transactions": db.query(models.Transaction).join(models.Asset, models.Transaction.asset_id == models.Asset.id).filter(models.Asset.user_id == user_id).count() if user_id is not None else db.query(models.Transaction).count(),
+                "holding_snapshots": db.query(models.HoldingSnapshot).join(models.Asset, models.HoldingSnapshot.asset_id == models.Asset.id).filter(models.Asset.user_id == user_id).count() if user_id is not None else db.query(models.HoldingSnapshot).count(),
+                "advices": db.query(models.Advice).join(models.Asset, models.Advice.asset_id == models.Asset.id).filter(models.Asset.user_id == user_id).count() if user_id is not None else db.query(models.Advice).count(),
+                "todo_items": db.query(models.TodoItem).join(models.Asset, models.TodoItem.asset_id == models.Asset.id).filter(models.Asset.user_id == user_id).count() if user_id is not None else db.query(models.TodoItem).count(),
+                "assets": db.query(models.Asset).filter(models.Asset.user_id == user_id).count() if user_id is not None else db.query(models.Asset).count(),
+
             }
             if include_settings:
                 before["app_settings"] = db.query(models.AppSetting).count()
                 before["skills"] = db.query(models.Skill).count()
             # 顺序重要：子表先清（虽然有 CASCADE，但保险起见）
-            db.execute(text("DELETE FROM transactions"))
-            db.execute(text("DELETE FROM holding_snapshots"))
-            db.execute(text("DELETE FROM advices"))
-            db.execute(text("DELETE FROM todo_items"))
-            db.execute(text("DELETE FROM assets"))
+            if user_id is not None:
+                db.execute(text("DELETE FROM transactions WHERE asset_id IN (SELECT id FROM assets WHERE user_id=:uid)"), {"uid": user_id})
+                db.execute(text("DELETE FROM holding_snapshots WHERE asset_id IN (SELECT id FROM assets WHERE user_id=:uid)"), {"uid": user_id})
+                db.execute(text("DELETE FROM advices WHERE asset_id IN (SELECT id FROM assets WHERE user_id=:uid)"), {"uid": user_id})
+                db.execute(text("DELETE FROM todo_items WHERE asset_id IN (SELECT id FROM assets WHERE user_id=:uid)"), {"uid": user_id})
+                db.execute(text("DELETE FROM assets WHERE user_id=:uid"), {"uid": user_id})
+            else:
+                db.execute(text("DELETE FROM transactions"))
+                db.execute(text("DELETE FROM holding_snapshots"))
+                db.execute(text("DELETE FROM advices"))
+                db.execute(text("DELETE FROM todo_items"))
+                db.execute(text("DELETE FROM assets"))
             if include_settings:
-                db.execute(text("DELETE FROM app_settings"))
+                if user_id is not None:
+                    db.execute(text("DELETE FROM app_settings WHERE key LIKE :prefix"), {"prefix": f"u:{user_id}:%"})
+                else:
+                    db.execute(text("DELETE FROM app_settings"))
+
                 db.execute(text("DELETE FROM skills"))
             db.flush()
 
@@ -441,6 +483,8 @@ def import_json(
                 db, a_data, mode, result,
                 include_transactions=include_transactions,
                 include_snapshots=include_snapshots,
+                user_id=user_id,
+
             )
         except Exception as e:
             result.errors.append(
@@ -448,7 +492,8 @@ def import_json(
             )
 
     if include_settings:
-        _import_settings(db, payload, result)
+        _import_settings(db, payload, result, user_id=user_id)
+
         _import_skills(db, payload, result)
 
     try:
@@ -520,7 +565,9 @@ def _import_one_asset(
     *,
     include_transactions: bool,
     include_snapshots: bool,
+    user_id: int | None = None,
 ) -> None:
+
     """导入一个 asset 及其子记录。"""
     name = (a_data.get("name") or "").strip()
     code = (a_data.get("code") or "").strip()
@@ -541,7 +588,8 @@ def _import_one_asset(
     except ValueError:
         m_enum = models.Market.otc
 
-    existing = _find_existing_asset(db, asset_type, code) if mode != "replace" else None
+    existing = _find_existing_asset(db, asset_type, code, user_id=user_id) if mode != "replace" else None
+
 
     if existing is not None:
         if mode == "skip":
@@ -554,7 +602,9 @@ def _import_one_asset(
     else:
         # 新建 asset
         target = models.Asset(
+            user_id=user_id,
             name=name,
+
             code=code or f"{asset_type}_imported_{abs(hash(name)) & 0xffffff:06x}",
             asset_type=at_enum,
             market=m_enum,
