@@ -18,7 +18,9 @@ import httpx
 from openai import OpenAI
 
 from ..logging_config import log_ai_event, safe_ai_config
+from ..services import ai_guard
 from .profiles import get_profile_prompt, get_profile_public, get_report_style_prompt
+
 
 
 
@@ -842,16 +844,23 @@ def run_agent(
                 is_5xx=is_5xx,
                 is_connection_error=is_conn,
             )
+            if is_429 or is_5xx:
+                ai_guard.penalize_from_exception_sync("hermes", ai_config, e, key="ai")
             if not is_retryable:
 
                 # 业务错误（401/400/模型不存在等）不重试
                 break
             if attempt + 1 < MAX_ATTEMPTS:
+
                 # 退避：429 / 5xx 一般是后端拥塞或限流，前几次等久点让队列消化
                 # 1.5 / 4 / 9 / 20s（最多 4 次尝试）
                 backoffs = [1.5, 4.0, 9.0, 20.0]
                 backoff = backoffs[min(attempt, len(backoffs) - 1)]
+                if is_429:
+                    # NIM 没给 Retry-After 时也不要短时间连打；429 通常代表账号/TPM/队列窗口需要冷却。
+                    backoff = max(backoff, 60.0)
                 # 429 优先用 Retry-After 头
+
                 if is_429:
                     try:
                         resp = getattr(e, "response", None)
