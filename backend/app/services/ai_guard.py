@@ -12,11 +12,8 @@ from . import rate_limiter as rl_mod
 CHARS_PER_TOKEN = 2.5
 NIM_DEFAULT_RPM = 10
 NIM_MAX_EFFECTIVE_RPM = 20
-# NIM 的 429 往往同时包含 RPM/TPM/并发队列限制；用更小的预算片换取稳定性，
-# 不裁剪 prompt / max_tokens，只让大请求排得更平滑。
-NIM_TOKENS_PER_SLOT = 2048
-NIM_MAX_UNITS = 12
-
+NIM_TOKENS_PER_SLOT = 4096
+NIM_MAX_UNITS = 6
 
 
 def is_nim_config(cfg: dict[str, Any] | None) -> bool:
@@ -150,20 +147,7 @@ async def acquire_ai_budget(
     return result
 
 
-def is_rate_or_server_error(exc: Exception) -> bool:
-    msg = str(exc)
-    low = msg.lower()
-    typ = type(exc).__name__
-    return (
-        "429" in msg
-        or "too many" in low
-        or typ == "RateLimitError"
-        or any(x in msg for x in ("500", "502", "503", "504", "Bad Gateway", "Service Unavailable", "Gateway Time"))
-    )
-
-
 async def penalize_from_exception(module: str, cfg: dict[str, Any] | None, exc: Exception, *, key: str = "ai") -> None:
-
     msg = str(exc)
     low = msg.lower()
     typ = type(exc).__name__
@@ -193,19 +177,3 @@ async def penalize_from_exception(module: str, cfg: dict[str, Any] | None, exc: 
         error_type=typ,
         error=msg[:1000],
     )
-
-
-def penalize_from_exception_sync(module: str, cfg: dict[str, Any] | None, exc: Exception, *, key: str = "ai") -> None:
-    """Sync wrapper for worker threads / sync agents such as Hermes."""
-    try:
-        asyncio.run(penalize_from_exception(module, cfg, exc, key=key))
-    except RuntimeError:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(penalize_from_exception(module, cfg, exc, key=key))
-        except Exception:
-            pass
-    except Exception:
-        pass
-

@@ -422,18 +422,10 @@ async def analyze_all_stream(user_id: int | None = None) -> AsyncIterator[dict]:
         failed = 0
         try:
             while True:
-                try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=10.0)
-                except asyncio.TimeoutError:
-                    ev = {"type": "heartbeat"}
-
+                ev = await queue.get()
                 if ev.get("__sentinel__"):
                     break
-                if ev.get("type") == "heartbeat":
-                    yield {"type": "log", "text": "⏳ AI 资产分析仍在进行中（等待模型限速/响应），连接保持中…"}
-                    continue
                 if ev["type"] == "asset_done":
-
                     analyzed += 1
                 elif ev["type"] == "asset_error":
                     failed += 1
