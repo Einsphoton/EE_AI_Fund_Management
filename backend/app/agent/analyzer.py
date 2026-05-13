@@ -13,7 +13,9 @@ from ..logging_config import log_ai_event, safe_ai_config
 from ..services import quotes as quotes_service
 from ..services import holdings as holding_service
 from ..services import ai_guard, settings_service, skills_service
+from ..services import ai_provider_pool
 from ..services import rate_limiter as rl_mod
+
 
 from ..tz import now_local
 from .hermes import run_agent
@@ -50,7 +52,9 @@ def _load_batch_context(db: Session, user_id: int | None = None) -> dict[str, An
         config=safe_ai_config(ai_cfg),
         skill_count=len(skill_prompts),
         skill_label=skill_label,
+        provider_count=ai_provider_pool.provider_count(ai_cfg),
     )
+
     return {
 
         "skill_prompts": skill_prompts,
@@ -59,8 +63,18 @@ def _load_batch_context(db: Session, user_id: int | None = None) -> dict[str, An
     }
 
 
+def _is_provider_retryable_fallback(result: dict[str, Any] | None) -> bool:
+    """run_agent 内部兜底为启发式结果时，允许换下一个 Provider 再试。"""
+    if not isinstance(result, dict):
+        return True
+    skill_used = str(result.get("skill_used") or "").lower()
+    detail = str(result.get("detail") or "")
+    return skill_used == "fallback" and "[调用大模型失败]" in detail
+
+
 async def _analyze_one_core(
     db: Session,
+
     asset: models.Asset,
     batch_id: str,
     source: str,
@@ -110,35 +124,87 @@ async def _analyze_one_core(
         "is_principal_guaranteed": asset.is_principal_guaranteed,
     }
 
-    # 全局 AI 预算守卫：NIM 下会按估算 token 把大请求拆成多个预算片，避免 RPM/TPM 瞬时尖峰。
-    try:
-        raw_mt = int((ctx["ai_cfg"] or {}).get("max_tokens") or 4096)
-    except (TypeError, ValueError):
-        raw_mt = 4096
+    # AI Provider 池：批量资产分析按权重轮询起始 Provider；遇到限流/超时等
+    # run_agent 内部兜底结果时，自动切到下一个 Provider 再试。
+    provider_sequence = ai_provider_pool.choose_provider_sequence(ctx["ai_cfg"], purpose="asset-analysis")
     prompt_chars = len(str(asset_dict)) + len(str(points[-60:] if len(points) > 60 else points)) + sum(len(p or "") for p in ctx["skill_prompts"])
-    try:
-        await ai_guard.acquire_ai_budget(
+    result: dict[str, Any] | None = None
+    attempted_provider_labels: list[str] = []
+
+    for idx, provider_cfg in enumerate(provider_sequence):
+        provider_label = ai_provider_pool.provider_label(provider_cfg)
+        attempted_provider_labels.append(provider_label)
+        if on_log is not None and len(provider_sequence) > 1:
+            try:
+                r = on_log(f"🔁 使用 AI Provider：{provider_label}（{idx + 1}/{len(provider_sequence)}）")
+                if asyncio.iscoroutine(r):
+                    await r
+            except Exception:
+                pass
+        log_ai_event(
             "analyzer",
-            ctx["ai_cfg"],
-            key="ai",
-            prompt_chars=prompt_chars,
-            max_tokens=max(1024, min(raw_mt, 8192)),
-            on_log=on_log,
+            "provider_selected",
+            batch_id=batch_id,
+            asset_id=asset.id,
+            provider=provider_label,
+            provider_index=idx + 1,
+            provider_total=len(provider_sequence),
+            config=safe_ai_config(provider_cfg),
         )
-    except asyncio.CancelledError:
-        raise
 
-    # 在线程池中执行同步的 OpenAI 调用，避免阻塞事件循环
+        # 全局 AI 预算守卫：每个 Provider 使用独立 key，因此多个合法 API Key 可各自按 RPM 排队。
+        try:
+            raw_mt = int((provider_cfg or {}).get("max_tokens") or 4096)
+        except (TypeError, ValueError):
+            raw_mt = 4096
+        try:
+            _ = await ai_guard.acquire_ai_budget(
+                "analyzer",
+                provider_cfg,
+                key=ai_provider_pool.provider_rate_key(provider_cfg),
+                prompt_chars=prompt_chars,
+                max_tokens=max(1024, min(raw_mt, 8192)),
+                on_log=on_log,
+            )
 
-    result = await asyncio.to_thread(
-        run_agent,
-        asset_dict, points, holding,
-        ctx["skill_prompts"], ctx["ai_cfg"], ctx["skill_label"],
-    )
+        except asyncio.CancelledError:
+            raise
+
+        # 在线程池中执行同步的 OpenAI 调用，避免阻塞事件循环
+        result = await asyncio.to_thread(
+            run_agent,
+            asset_dict, points, holding,
+            ctx["skill_prompts"], provider_cfg, ctx["skill_label"],
+        )
+        if not _is_provider_retryable_fallback(result) or idx == len(provider_sequence) - 1:
+            break
+        log_ai_event(
+            "analyzer",
+            "provider_failover",
+            level="warning",
+            batch_id=batch_id,
+            asset_id=asset.id,
+            failed_provider=provider_label,
+            next_provider=ai_provider_pool.provider_label(provider_sequence[idx + 1]),
+        )
+        if on_log is not None:
+            try:
+                r = on_log(f"⚠️ {provider_label} 调用失败，切换到下一个 AI Provider…")
+                if asyncio.iscoroutine(r):
+                    await r
+            except Exception:
+                pass
+
+    if result is None:
+        result = run_agent(asset_dict, points, holding, ctx["skill_prompts"], ctx["ai_cfg"], ctx["skill_label"])
+    if attempted_provider_labels:
+        result["provider_used"] = attempted_provider_labels[-1]
+
 
     extra_keys = ("score", "fundamentals", "macro", "micro", "risks", "pros",
                   "advice", "commentary", "profile_note", "investor_profile",
-                  "time_horizon", "target_price", "stop_loss")
+                  "time_horizon", "target_price", "stop_loss", "provider_used")
+
     extra = {k: result.get(k) for k in extra_keys if k in result}
     advice = models.Advice(
         asset_id=asset.id,

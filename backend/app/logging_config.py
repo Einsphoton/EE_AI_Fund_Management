@@ -82,6 +82,23 @@ def redact_obj(value: Any, *, max_str: int = 1200) -> Any:
 
 def safe_ai_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
     cfg = cfg or {}
+    providers = cfg.get("providers") or []
+    provider_summary = []
+    if isinstance(providers, list):
+        for idx, p in enumerate(providers[:20]):
+            if not isinstance(p, dict):
+                continue
+            provider_summary.append({
+                "id": p.get("id") or f"provider-{idx + 1}",
+                "name": p.get("name") or "",
+                "enabled": p.get("enabled", True),
+                "base_url": p.get("base_url") or "",
+                "model": p.get("model") or "",
+                "rpm_limit": p.get("rpm_limit"),
+                "min_interval_sec": p.get("min_interval_sec"),
+                "weight": p.get("weight", 1),
+                "has_api_key": bool(p.get("api_key")),
+            })
     return {
         "base_url": cfg.get("base_url") or "",
         "model": cfg.get("model") or "",
@@ -97,10 +114,15 @@ def safe_ai_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
         "thinking_budget": cfg.get("thinking_budget"),
         "reasoning_effort": cfg.get("reasoning_effort"),
         "cf_access_hosts": cfg.get("cf_access_hosts") or "",
+        "pool_include_primary": cfg.get("pool_include_primary"),
+        "provider_count": len(provider_summary),
+        "providers": provider_summary,
+        "selected_provider": cfg.get("_provider_name") or cfg.get("_provider_id") or "",
         "has_api_key": bool(cfg.get("api_key")),
         "has_cf_access_client_id": bool(cfg.get("cf_access_client_id")),
         "has_cf_access_client_secret": bool(cfg.get("cf_access_client_secret")),
     }
+
 
 
 class ContextFilter(logging.Filter):

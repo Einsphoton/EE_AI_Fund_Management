@@ -69,6 +69,11 @@ DEFAULTS: dict[str, Any] = {
         # 逗号分隔的域名列表，只有 base_url 包含其中任意一项时才注入上面的 CF Header
         # 默认为空 = 只要配置了 Client Id/Secret，对所有请求都注入
         "cf_access_hosts": "",
+        # 可选 AI Provider 池：批量资产分析时会在主配置 + providers 之间轮询，
+        # 每个 provider 拥有独立 RPM/间隔窗口，用于多组合法 API Key 的故障转移与分摊。
+        "pool_include_primary": True,
+        "pool_primary_name": "主配置",
+        "providers": [],
     },
     "vision": {
         # 多模态视觉模型，用于截图 OCR 解析持仓页。

@@ -12,7 +12,8 @@ import toast from "react-hot-toast";
 
 import PageHeader from "../components/PageHeader";
 import LLMConfigCard, { LLMPreset, LLMConfigState } from "../components/LLMConfigCard";
-import { Settings as SettingsApi, AppSettings, Admin, ImportResult, InvestmentBudgetItem, AssetType, UpdateApi } from "../api/client";
+import { Settings as SettingsApi, AppSettings, Admin, ImportResult, InvestmentBudgetItem, AssetType, UpdateApi, AIProviderConfig } from "../api/client";
+
 
 
 const PRESETS: Record<string, string> = {
@@ -124,7 +125,9 @@ export default function SettingsPage() {
 
     cf_access_client_id: "", cf_access_client_secret: "", cf_access_hosts: "",
     thinking_mode: "auto", thinking_budget: 0, reasoning_effort: "medium",
+    pool_include_primary: true, pool_primary_name: "主配置", providers: [],
   });
+
   const [vision, setVision] = useState<NonNullable<AppSettings["vision"]>>({
     use_ai: true,  // 默认复用 AI 大模型，体验最简
     base_url: "", api_key: "", model: "",
@@ -169,7 +172,11 @@ export default function SettingsPage() {
       thinking_mode: (data.ai.thinking_mode as any) ?? "auto",
       thinking_budget: data.ai.thinking_budget ?? 0,
       reasoning_effort: (data.ai.reasoning_effort as any) ?? "medium",
+      pool_include_primary: data.ai.pool_include_primary ?? true,
+      pool_primary_name: data.ai.pool_primary_name ?? "主配置",
+      providers: data.ai.providers ?? [],
     });
+
     if (data.vision) {
       setVision({
         use_ai: data.vision.use_ai ?? true,
@@ -279,16 +286,20 @@ export default function SettingsPage() {
 
       <div className="grid lg:grid-cols-2 gap-6">
         {/* ============ AI 大模型 ============ */}
-        <LLMConfigCard
-          title="AI 大模型"
-          subtitle="支持任意 OpenAI 兼容协议（DeepSeek / OpenAI / 本地 Ollama / LM Studio 等）。用于生成 AI 分析报告。"
-          icon={<Zap className="w-4 h-4 text-accent" />}
-          presets={AI_PRESETS}
-          value={aiAsLLM}
-          onChange={onAiChange}
-          mode="ai"
-          showCfAccess
-        />
+        <div className="space-y-3">
+          <LLMConfigCard
+            title="AI 大模型"
+            subtitle="支持任意 OpenAI 兼容协议（DeepSeek / OpenAI / 本地 Ollama / LM Studio 等）。用于生成 AI 分析报告。"
+            icon={<Zap className="w-4 h-4 text-accent" />}
+            presets={AI_PRESETS}
+            value={aiAsLLM}
+            onChange={onAiChange}
+            mode="ai"
+            showCfAccess
+          />
+          <AIProviderPoolCard ai={ai} setAi={setAi} />
+        </div>
+
 
         {/* ============ 视觉模型 ============ */}
         {vision.use_ai ? (
@@ -787,7 +798,233 @@ function BudgetSettingsCard({ items, onChange }: {
 }
 
 // ============================================================
+// AIProviderPoolCard：批量资产分析 API 池（多 NIM/API Key 轮询 + 故障切换）
+// ============================================================
+type AIState = AppSettings["ai"];
+
+function newProviderId() {
+  try {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  } catch {}
+  return `provider-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function AIProviderPoolCard({ ai, setAi }: { ai: AIState; setAi: (v: AIState) => void }) {
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const providers = ai.providers ?? [];
+
+  const setProviders = (next: AIProviderConfig[]) => setAi({ ...ai, providers: next });
+  const updateProvider = (id: string, patch: Partial<AIProviderConfig>) => {
+    setProviders(providers.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  };
+  const addProvider = () => {
+    const idx = providers.length + 1;
+    setProviders([
+      ...providers,
+      {
+        id: newProviderId(),
+        name: `NIM Key ${idx}`,
+        enabled: true,
+        base_url: ai.base_url || "https://integrate.api.nvidia.com/v1",
+        api_key: "",
+        model: ai.model || "",
+        rpm_limit: ai.rpm_limit || 10,
+        min_interval_sec: 0,
+        weight: 1,
+      },
+    ]);
+  };
+  const removeProvider = (id: string) => {
+    setProviders(providers.filter((p) => p.id !== id));
+    setTestResults((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+  const testProvider = async (p: AIProviderConfig) => {
+    const base_url = p.base_url || ai.base_url || "";
+    const api_key = p.api_key || ai.api_key || "";
+    const model = p.model || ai.model || "";
+    if (!base_url) {
+      setTestResults((prev) => ({ ...prev, [p.id]: { ok: false, text: "请填写 Base URL 或主配置 Base URL" } }));
+      return;
+    }
+    setTestingId(p.id);
+    try {
+      const r = await SettingsApi.testAi(base_url, api_key, model, {
+        cf_access_client_id: ai.cf_access_client_id,
+        cf_access_client_secret: ai.cf_access_client_secret,
+        cf_access_hosts: ai.cf_access_hosts,
+      });
+      const modelHint = model ? (r.model_exists ? `模型存在：${model}` : `模型不在列表中：${model}`) : "已连接，可从模型列表选择";
+      setTestResults((prev) => ({
+        ...prev,
+        [p.id]: {
+          ok: !!r.ok && (r.model_exists !== false),
+          text: `${modelHint}${r.models?.length ? `；返回 ${r.models.length} 个模型` : ""}${r.hint ? `\n${r.hint}` : ""}`,
+        },
+      }));
+    } catch (e: any) {
+      setTestResults((prev) => ({ ...prev, [p.id]: { ok: false, text: e.message || "测试失败" } }));
+    } finally {
+      setTestingId(null);
+    }
+  };
+
+  const enabledCount = providers.filter((p) => p.enabled !== false).length + (ai.pool_include_primary === false ? 0 : 1);
+
+  return (
+    <div className="card p-5 text-xs space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="font-semibold text-sm mb-1 flex items-center gap-2">
+            <Rocket className="w-4 h-4 text-accent" /> AI API 池（批量资产分析）
+          </h3>
+          <p className="text-muted leading-relaxed">
+            批量分析会在主配置和下方 Provider 间轮询；每个 Provider 独立 RPM 限速，某个 Key 限流/超时时会自动切换下一个。
+          </p>
+        </div>
+        <button type="button" className="btn !px-3 !py-1.5 shrink-0" onClick={addProvider}>
+          <Plus className="w-3.5 h-3.5" /> 添加
+        </button>
+      </div>
+
+      <label className="flex items-center gap-2 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          className="accent-accent w-4 h-4"
+          checked={ai.pool_include_primary !== false}
+          onChange={(e) => setAi({ ...ai, pool_include_primary: e.target.checked })}
+        />
+        <span>把上方「AI 大模型」主配置也纳入轮询</span>
+        <span className="text-muted">当前可用通道约 {enabledCount} 个</span>
+      </label>
+
+      {providers.length === 0 ? (
+        <div className="rounded-lg border border-line/60 bg-bg-soft/40 p-3 text-muted leading-relaxed">
+          还没有额外 Provider。点击「添加」后填入其它 NIM API Key；Base URL / Model 可与主配置相同。
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {providers.map((p, idx) => {
+            const result = testResults[p.id];
+            return (
+              <div key={p.id} className="rounded-xl border border-line bg-bg-soft/30 p-3 space-y-3">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    className="accent-accent w-4 h-4"
+                    checked={p.enabled !== false}
+                    onChange={(e) => updateProvider(p.id, { enabled: e.target.checked })}
+                    title="启用该 Provider"
+                  />
+                  <input
+                    className="input !py-1.5 flex-1"
+                    value={p.name || ""}
+                    onChange={(e) => updateProvider(p.id, { name: e.target.value })}
+                    placeholder={`Provider ${idx + 1}`}
+                  />
+                  <button
+                    type="button"
+                    className="btn !px-3 !py-1.5"
+                    onClick={() => testProvider(p)}
+                    disabled={testingId === p.id}
+                  >
+                    {testingId === p.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    测试
+                  </button>
+                  <button type="button" className="btn !px-2 !py-1.5 text-red-300" onClick={() => removeProvider(p.id)}>
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div>
+                    <label className="label">Base URL</label>
+                    <input
+                      className="input"
+                      value={p.base_url || ""}
+                      onChange={(e) => updateProvider(p.id, { base_url: e.target.value })}
+                      placeholder={ai.base_url || "留空继承主配置"}
+                    />
+                  </div>
+                  <div>
+                    <label className="label">API Key</label>
+                    <input
+                      className="input"
+                      type="password"
+                      value={p.api_key || ""}
+                      onChange={(e) => updateProvider(p.id, { api_key: e.target.value })}
+                      placeholder="sk-xxxx"
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Model</label>
+                    <input
+                      className="input"
+                      value={p.model || ""}
+                      onChange={(e) => updateProvider(p.id, { model: e.target.value })}
+                      placeholder={ai.model || "留空继承主配置"}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="label">RPM</label>
+                    <input
+                      className="input"
+                      type="number" min={0} max={1000} step={1}
+                      value={p.rpm_limit ?? ai.rpm_limit ?? 0}
+                      onChange={(e) => updateProvider(p.id, { rpm_limit: Math.max(0, Math.min(1000, e.target.valueAsNumber || 0)) })}
+                    />
+                  </div>
+                  <div>
+                    <label className="label">权重</label>
+                    <input
+                      className="input"
+                      type="number" min={1} max={20} step={1}
+                      value={p.weight ?? 1}
+                      onChange={(e) => updateProvider(p.id, { weight: Math.max(1, Math.min(20, e.target.valueAsNumber || 1)) })}
+                    />
+                  </div>
+                  <div>
+                    <label className="label">最小间隔(秒)</label>
+                    <input
+                      className="input"
+                      type="number" min={0} max={120} step={1}
+                      value={p.min_interval_sec ?? 0}
+                      onChange={(e) => updateProvider(p.id, { min_interval_sec: Math.max(0, Math.min(120, e.target.valueAsNumber || 0)) })}
+                    />
+                  </div>
+                </div>
+
+                {result && (
+                  <div className={`rounded-lg border p-2 whitespace-pre-wrap leading-relaxed ${
+                    result.ok ? "border-emerald2/30 bg-emerald2/5 text-emerald2" : "border-red-400/30 bg-red-500/5 text-red-200"
+                  }`}>
+                    {result.ok ? <Check className="w-3.5 h-3.5 inline mr-1" /> : <AlertTriangle className="w-3.5 h-3.5 inline mr-1" />}
+                    {result.text}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="text-[10px] text-muted leading-relaxed">
+        说明：空的 Base URL / Model 会继承主配置；API Key 建议每个 Provider 单独填写。请确保多 Key 使用方式符合服务商规则。
+      </p>
+    </div>
+  );
+}
+
+// ============================================================
 // VisionAdvanced：OCR 性能参数（max_tokens / timeout / 并发 / JSON Mode）
+
 //   - 复用 AI 端点时也能编辑（这些是 OCR 任务专属）
 //   - compact=true 时去掉标题和外层卡片样式（嵌入到 LLMConfigCard 下面用）
 // ============================================================

@@ -208,7 +208,10 @@ export interface AdviceExtra {
   advice?: string;
   /** AI 深度点评：自由发挥的 Markdown 长文，是分析报告的主观核心。 */
   commentary?: string;
+  /** 本次资产分析实际使用的 AI Provider 名称。 */
+  provider_used?: string;
   time_horizon?: "short" | "mid" | "long" | string;
+
   target_price?: number | null;
   stop_loss?: number | null;
 }
@@ -303,8 +306,28 @@ export interface InvestmentBudgetItem {
   asset_types?: AssetType[];
 }
 
+export interface AIProviderConfig {
+  id: string;
+  name: string;
+  enabled?: boolean;
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  timeout?: number;
+  rpm_limit?: number;
+  min_interval_sec?: number;
+  nim_optimization_enabled?: boolean;
+  thinking_mode?: "auto" | "on" | "off";
+  thinking_budget?: number;
+  reasoning_effort?: "minimal" | "low" | "medium" | "high" | string;
+  weight?: number;
+}
+
 export interface AppSettings {
   ai: {
+
     base_url: string;
     api_key: string;
     model: string;
@@ -338,7 +361,13 @@ export interface AppSettings {
     thinking_budget?: number;
     /** OpenAI o-series / GPT-5 / Kimi 等的强度参数：minimal / low / medium / high */
     reasoning_effort?: "minimal" | "low" | "medium" | "high" | string;
+    /** 批量资产分析是否把上方主配置也纳入 Provider 池 */
+    pool_include_primary?: boolean;
+    pool_primary_name?: string;
+    /** 额外 AI Provider/API Key 池；批量资产分析会轮询并在失败时切换 */
+    providers?: AIProviderConfig[];
   };
+
   /** 多模态视觉模型（用于 OCR 截图导入） */
   vision?: {
     /** 复用 AI 大模型配置（开启后下面字段都忽略，直接走 ai 配置） */
