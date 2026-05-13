@@ -119,8 +119,9 @@ export default function SettingsPage() {
   const [ai, setAi] = useState<AppSettings["ai"]>({
     base_url: "", api_key: "", model: "",
     temperature: 0.4, batch_concurrency: 2, max_tokens: 4096, timeout: 180,
-    rpm_limit: 0, min_interval_sec: 0,
+    rpm_limit: 0, min_interval_sec: 0, nim_optimization_enabled: true,
     investor_profile: "balanced", report_style: "pro",
+
     cf_access_client_id: "", cf_access_client_secret: "", cf_access_hosts: "",
     thinking_mode: "auto", thinking_budget: 0, reasoning_effort: "medium",
   });
@@ -158,7 +159,9 @@ export default function SettingsPage() {
       timeout: data.ai.timeout ?? 180,
       rpm_limit: data.ai.rpm_limit ?? 0,
       min_interval_sec: data.ai.min_interval_sec ?? 0,
+      nim_optimization_enabled: data.ai.nim_optimization_enabled ?? true,
       investor_profile: data.ai.investor_profile ?? "balanced",
+
       report_style: data.ai.report_style ?? "pro",
       cf_access_client_id: data.ai.cf_access_client_id ?? "",
       cf_access_client_secret: data.ai.cf_access_client_secret ?? "",
@@ -224,7 +227,9 @@ export default function SettingsPage() {
     temperature: ai.temperature, batch_concurrency: ai.batch_concurrency,
     max_tokens: ai.max_tokens, timeout: ai.timeout,
     rpm_limit: ai.rpm_limit, min_interval_sec: ai.min_interval_sec,
+    nim_optimization_enabled: ai.nim_optimization_enabled,
     cf_access_client_id: ai.cf_access_client_id,
+
     cf_access_client_secret: ai.cf_access_client_secret,
     cf_access_hosts: ai.cf_access_hosts,
     thinking_mode: ai.thinking_mode as any,

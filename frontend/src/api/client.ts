@@ -322,7 +322,10 @@ export interface AppSettings {
     rpm_limit?: number;
     /** 相邻两次请求最小硬间隔（秒）。已被 rpm_limit 覆盖大多数场景；兜底用。 */
     min_interval_sec?: number;
+    /** NIM 友好优化：通过全局排队和 token 预算片平滑限流，不裁剪模型能力。 */
+    nim_optimization_enabled?: boolean;
     /** 投资者性格 id：balanced / conservative / aggressive / income / growth / value / trader */
+
     investor_profile?: string;
     /** 报告风格 id：pro / beginner */
     report_style?: string;

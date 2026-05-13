@@ -10,7 +10,8 @@ from .. import models
 from ..agent.hermes import _get_openai_client, _parse_json
 from ..agent.profiles import get_profile_prompt, get_profile_public
 from ..logging_config import log_ai_event, safe_ai_config
-from ..services import settings_service
+from ..services import ai_guard, settings_service
+
 
 from ..services.investment_manager import get_budget_status
 from ..tz import now_local
@@ -135,17 +136,26 @@ async def recommend_ai_targets(db: Session, limit: int = 5, user_id: int | None 
         existing_count=len(existing),
         allowed_pair_count=len(allowed_pairs),
     )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+    ]
+    max_tokens = int(ai_cfg.get("max_tokens") or 4096)
     try:
-        resp = client.chat.completions.create(
-
-            model=ai_cfg.get("model") or "deepseek-chat",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            ],
-            temperature=float(ai_cfg.get("temperature", 0.4) or 0.4),
-            max_tokens=int(ai_cfg.get("max_tokens") or 4096),
+        await ai_guard.acquire_ai_budget(
+            "target_recommender",
+            ai_cfg,
+            key="ai",
+            messages=messages,
+            max_tokens=max_tokens,
         )
+        resp = client.chat.completions.create(
+            model=ai_cfg.get("model") or "deepseek-chat",
+            messages=messages,
+            temperature=float(ai_cfg.get("temperature", 0.4) or 0.4),
+            max_tokens=max_tokens,
+        )
+
         text = resp.choices[0].message.content if resp.choices else ""
         parsed = _parse_json(text or "") or {}
         log_ai_event(
@@ -156,6 +166,7 @@ async def recommend_ai_targets(db: Session, limit: int = 5, user_id: int | None 
             parsed=bool(parsed),
         )
     except Exception as e:
+        await ai_guard.penalize_from_exception("target_recommender", ai_cfg, e, key="ai")
         log_ai_event(
             "target_recommender",
             "target_recommend_failed",
@@ -165,6 +176,7 @@ async def recommend_ai_targets(db: Session, limit: int = 5, user_id: int | None 
             error=str(e),
         )
         raise TargetRecommendationError(f"AI 更新推荐标的失败：{type(e).__name__}: {e}") from e
+
 
     targets = parsed.get("targets") if isinstance(parsed, dict) else []
 

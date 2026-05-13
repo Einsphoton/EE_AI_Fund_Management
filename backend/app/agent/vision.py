@@ -42,7 +42,8 @@ from openai import OpenAI
 
 from .. import models
 from ..logging_config import log_ai_event, safe_ai_config
-from ..services import settings_service
+from ..services import ai_guard, settings_service
+
 
 
 
@@ -123,12 +124,18 @@ def _get_vision_config(db) -> dict | None:
             "wall_timeout": cfg.get("wall_timeout", 90),
             "content_hardcap": cfg.get("content_hardcap", 20000),
             "auto_fill_code": cfg.get("auto_fill_code", True),
+            "nim_optimization_enabled": ai_cfg.get("nim_optimization_enabled", True),
             "_use_ai": True,
+
         }
         return merged
     if not cfg.get("base_url") or not cfg.get("api_key") or not cfg.get("model"):
         return None
+    ai_cfg = settings_service.get(db, "ai") or {}
+    cfg = dict(cfg)
+    cfg["nim_optimization_enabled"] = ai_cfg.get("nim_optimization_enabled", True)
     return cfg
+
 
 
 def _build_client(db, cfg: dict) -> OpenAI:
@@ -500,6 +507,15 @@ async def parse_image(
         f"{'（已从配置中的 ' + str(raw_mt) + ' 自动抬高，OCR 必须 >= 1024）' if raw_mt is not None and (not isinstance(raw_mt, int) or raw_mt < 1024) else ''}"
         f"{', json_mode=on' if use_json_mode else ''}, stream={'on' if use_stream else 'off'}）"
     )
+    await ai_guard.acquire_ai_budget(
+        "vision",
+        cfg,
+        key="vision",
+        messages=messages,
+        max_tokens=max_tokens,
+        on_log=_log,
+    )
+
 
 
     async def _call_model_oneshot(with_json_mode: bool, with_no_think: bool = False):

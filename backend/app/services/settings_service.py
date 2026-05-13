@@ -38,7 +38,11 @@ DEFAULTS: dict[str, Any] = {
         # min_interval_sec：相邻两次请求最小硬间隔（秒）。已被 rpm_limit 覆盖大多数
         # 场景；只在某些代理/网关明确要求"两次之间至少 N 秒"时启用。
         "min_interval_sec": 0,
+        # NIM 友好优化：不降低模型能力，只通过全局排队/预算片平滑 RPM/TPM/并发尖峰。
+        # 关闭后按用户填写的 rpm_limit/min_interval 原样执行。
+        "nim_optimization_enabled": True,
         # ==== 思考 / Reasoning 控制（统一抽象，兼容 2026 年主流大模型）====
+
         # thinking_mode:
         #   "auto"  - 不显式传任何思考参数，让模型按默认行为运行（推荐）
         #   "on"    - 强制开启思考（透传 enable_thinking=true / thinking.type="enabled"）

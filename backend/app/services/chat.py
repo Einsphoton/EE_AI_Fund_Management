@@ -27,7 +27,9 @@ from .. import models
 from ..logging_config import log_ai_event, safe_ai_config
 from . import quotes as quotes_service
 from . import holdings as holding_service
-from . import settings_service, skills_service
+from . import ai_guard, settings_service, skills_service
+
+
 
 
 
@@ -46,8 +48,10 @@ CHAT_SYSTEM_PROMPT = (
 # ---------- Token 预算 ----------
 # DeepSeek-Chat / 多数 OpenAI 兼容模型：context window ≈ 32k ~ 128k，
 # 但 input+output 共享，且 stream=True 时 completion 默认不设限。
-# 我们保守按 "给 input 预留 16k token" 设计，留 4k 给 completion。
+# Chat 保留较完整资产上下文；NIM 由全局 AI 预算守卫排队平滑，而不是牺牲上下文能力。
 MAX_INPUT_TOKENS = 16000
+
+
 # 粗略 1 token ≈ 1.7 中文字 / 3.5 英文字节；JSON 场景取中间值 ≈ 2.5 字/ token
 CHARS_PER_TOKEN = 2.5
 # 对话滚动窗口：保留最近 N 轮（user+assistant 配对计 1 轮）
@@ -324,7 +328,12 @@ def _llm_client(ai_cfg: dict[str, Any]) -> OpenAI | None:
         cf_header_injected=has_cf,
     )
 
-    http_client = _httpx.Client(timeout=120.0, headers=headers)
+    try:
+        timeout_sec = float((ai_cfg or {}).get("timeout") or 120)
+    except (TypeError, ValueError):
+        timeout_sec = 120.0
+    http_client = _httpx.Client(timeout=timeout_sec, headers=headers)
+
     # OpenAI SDK 会在更下层把 User-Agent 覆盖成 "OpenAI/Python x.x.x"，
     # 这个 UA 会被 Cloudflare 的 "Block AI Scrapers and Crawlers" 精准识别并 block。
     # 通过 default_headers 强制覆盖回浏览器风格 UA，作为 CF 规则的兜底。
@@ -337,10 +346,12 @@ def _llm_client(ai_cfg: dict[str, Any]) -> OpenAI | None:
     return OpenAI(
         base_url=base_url,
         api_key=api_key,
-        timeout=120,
+        timeout=timeout_sec,
         http_client=http_client,
         default_headers=default_headers,
+        max_retries=0,
     )
+
 
 
 async def stream_chat(db: Session, history: list[dict[str, str]], user_id: int | None = None):
@@ -397,7 +408,16 @@ async def stream_chat(db: Session, history: list[dict[str, str]], user_id: int |
 
     model = ai_cfg.get("model") or "deepseek-chat"
     temperature = float(ai_cfg.get("temperature", 0.4))
+    try:
+        raw_max_tokens = int(ai_cfg.get("max_tokens") or 0)
+    except (TypeError, ValueError):
+        raw_max_tokens = 0
+    # Chat 不使用“0=不限”，但保留足够输出预算；由全局预算守卫按 token 成本排队。
+    chat_max_tokens = raw_max_tokens if raw_max_tokens > 0 else 4096
+    chat_max_tokens = max(512, min(chat_max_tokens, 8192))
+
     input_chars = sum(len(m.get("content", "")) for m in messages)
+
     output_chars = 0
     import time as _time
     started_at = _time.perf_counter()
@@ -411,12 +431,30 @@ async def stream_chat(db: Session, history: list[dict[str, str]], user_id: int |
         input_chars=input_chars,
         portfolio_context_chars=len(portfolio_ctx),
         skill_prompt_count=len(skill_prompts),
+        max_tokens=chat_max_tokens,
     )
+
+    try:
+        _ = await ai_guard.acquire_ai_budget(
+            "chat",
+            ai_cfg,
+            key="ai",
+            messages=messages,
+            max_tokens=chat_max_tokens,
+        )
+    except asyncio.CancelledError:
+        raise
+
 
     def _do_stream():
         return client.chat.completions.create(
-            model=model, messages=messages, temperature=temperature, stream=True,
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=chat_max_tokens,
+            stream=True,
         )
+
 
     try:
         stream = await asyncio.to_thread(_do_stream)
@@ -471,7 +509,20 @@ async def stream_chat(db: Session, history: list[dict[str, str]], user_id: int |
                 "- DeepSeek/OpenAI：检查 API Key 是否正确、是否欠费\n"
                 "- Ollama 不校验 Key，但前端要求非空，随便填都能通"
             )
+        elif "429" in msg or "too many" in low or type(e).__name__ == "RateLimitError":
+            hint = (
+                "\n\n**模型服务限流。**\n"
+                "- 当前服务商返回 429 Too Many Requests，通常是 RPM/TPM/并发额度不足\n"
+                "- 已自动把后续 AI 请求纳入限速等待；建议稍等 1-5 分钟再试\n"
+                "- 若使用 NVIDIA NIM，建议把 AI 设置里的 RPM 调到 10-20，并发调到 1"
+            )
+            try:
+                await ai_guard.penalize_from_exception("chat", ai_cfg, e, key="ai")
+            except Exception:
+                pass
+
         log_ai_event(
+
             "chat",
             "chat_stream_failed",
             level="error",

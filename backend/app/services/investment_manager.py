@@ -12,7 +12,8 @@ from .. import models
 from ..agent.hermes import _get_openai_client, _parse_json
 from ..agent.profiles import get_profile_prompt, get_profile_public
 from ..logging_config import log_ai_event, safe_ai_config
-from ..services import holdings as holding_service, quotes as quotes_service, settings_service
+from ..services import ai_guard, holdings as holding_service, quotes as quotes_service, settings_service
+
 from ..tz import now_local
 
 
@@ -321,16 +322,26 @@ async def run_investment_manager(db: Session, user_id: int | None = None) -> dic
             "pending_todos": pending_todo_context,
             "instruction": "请根据预算和资产现状生成本次需要进入 To-do 的 buy/sell 动作。暂不推荐新标的；pending_todos 中已有未处理建议的资产不要重复推送，除非 urgent=true。",
         }
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ]
+        max_tokens = int(ai_cfg.get("max_tokens") or 4096)
         try:
+            await ai_guard.acquire_ai_budget(
+                "investment_manager",
+                ai_cfg,
+                key="ai",
+                messages=messages,
+                max_tokens=max_tokens,
+            )
             resp = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-                ],
+                messages=messages,
                 temperature=temperature,
-                max_tokens=int(ai_cfg.get("max_tokens") or 4096),
+                max_tokens=max_tokens,
             )
+
             text = resp.choices[0].message.content if resp.choices else ""
             parsed = _parse_json(text or "")
             log_ai_event(
@@ -341,6 +352,7 @@ async def run_investment_manager(db: Session, user_id: int | None = None) -> dic
                 parsed=bool(parsed),
             )
         except Exception as e:
+            await ai_guard.penalize_from_exception("investment_manager", ai_cfg, e, key="ai")
             log_ai_event(
                 "investment_manager",
                 "investment_plan_failed",
@@ -349,6 +361,7 @@ async def run_investment_manager(db: Session, user_id: int | None = None) -> dic
                 error_type=type(e).__name__,
                 error=str(e),
             )
+
 
     result = parsed if isinstance(parsed, dict) else _fallback_actions(rows, budget_status)
 

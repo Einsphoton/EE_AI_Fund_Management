@@ -18,8 +18,12 @@ from .config import settings
 _request_id: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 _user_id: contextvars.ContextVar[str] = contextvars.ContextVar("user_id", default="-")
 
-_SENSITIVE_KEY_RE = re.compile(r"(api[_-]?key|authorization|bearer|token|secret|password|passwd|cookie)", re.I)
+_SENSITIVE_KEY_RE = re.compile(
+    r"(^|[_-])(api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|password|passwd|cookie)([_-]|$)",
+    re.I,
+)
 _SECRET_VALUE_RE = re.compile(
+
     r"(?i)(sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{12,}|[A-Za-z0-9]{32,}\.access|[a-f0-9]{48,})"
 )
 _STANDARD_ATTRS = {
@@ -65,10 +69,11 @@ def redact_obj(value: Any, *, max_str: int = 1200) -> Any:
         out: dict[str, Any] = {}
         for k, v in value.items():
             key = str(k)
-            if _SENSITIVE_KEY_RE.search(key):
+            if _SENSITIVE_KEY_RE.search(key) and not key.lower().startswith("has_"):
                 out[key] = "***REDACTED***" if v else ""
             else:
                 out[key] = redact_obj(v, max_str=max_str)
+
         return out
     if isinstance(value, (list, tuple, set)):
         return [redact_obj(v, max_str=max_str) for v in list(value)[:50]]
@@ -86,7 +91,9 @@ def safe_ai_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
         "batch_concurrency": cfg.get("batch_concurrency"),
         "rpm_limit": cfg.get("rpm_limit"),
         "min_interval_sec": cfg.get("min_interval_sec"),
+        "nim_optimization_enabled": cfg.get("nim_optimization_enabled"),
         "thinking_mode": cfg.get("thinking_mode"),
+
         "thinking_budget": cfg.get("thinking_budget"),
         "reasoning_effort": cfg.get("reasoning_effort"),
         "cf_access_hosts": cfg.get("cf_access_hosts") or "",

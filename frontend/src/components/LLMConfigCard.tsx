@@ -39,7 +39,10 @@ export interface LLMConfigState {
   rpm_limit?: number;
   /** 相邻两次请求最小硬间隔（秒） */
   min_interval_sec?: number;
+  /** NIM 友好优化：全局排队 + token 预算片，不裁剪模型能力 */
+  nim_optimization_enabled?: boolean;
   cf_access_client_id?: string;    // 仅 AI 卡片维护，Vision 卡片复用 AI 的
+
   cf_access_client_secret?: string;
   cf_access_hosts?: string;
   // 思考 / Reasoning 控制（AI 专有，Vision 不需要）
@@ -285,8 +288,25 @@ export default function LLMConfigCard({
                 仅当代理明确要求"两次至少 N 秒"时启用。两个限速谁严格谁说了算。
               </p>
             </div>
+            <div className="col-span-2 rounded-lg border border-accent/20 bg-accent/5 p-3">
+              <label className="inline-flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 accent-emerald-400"
+                  checked={value.nim_optimization_enabled ?? true}
+                  onChange={(e) => set({ nim_optimization_enabled: e.target.checked })}
+                />
+                <span>
+                  <span className="block text-xs text-white/90 font-medium">启用 NVIDIA NIM 友好优化</span>
+                  <span className="block text-[10px] text-muted mt-1 leading-relaxed">
+                    不裁剪上下文、不降低模型能力；仅通过全局排队、最小间隔和按估算 token 拆预算片，平滑 Chat / 资产分析 / OCR 的 RPM/TPM 尖峰。
+                  </span>
+                </span>
+              </label>
+            </div>
           </div>
         )}
+
       </div>
 
       {/* ============ 思考 / Reasoning（仅 ai 模式） ============ */}

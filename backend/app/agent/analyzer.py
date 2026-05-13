@@ -12,8 +12,9 @@ from ..database import SessionLocal
 from ..logging_config import log_ai_event, safe_ai_config
 from ..services import quotes as quotes_service
 from ..services import holdings as holding_service
-from ..services import settings_service, skills_service
+from ..services import ai_guard, settings_service, skills_service
 from ..services import rate_limiter as rl_mod
+
 from ..tz import now_local
 from .hermes import run_agent
 
@@ -109,23 +110,26 @@ async def _analyze_one_core(
         "is_principal_guaranteed": asset.is_principal_guaranteed,
     }
 
-    # 限速：必要时等到下一个槽位再发请求
-    if rl_mod.limiter.is_active("ai"):
-        async def _on_waiting(secs: float, reason: str) -> None:
-            if on_log is not None:
-                msg = f"⏳ 限速等待 {secs:.1f}s（{reason}）"
-                try:
-                    r = on_log(msg)
-                    if asyncio.iscoroutine(r):
-                        await r
-                except Exception:
-                    pass
-        try:
-            await rl_mod.limiter.wait_for_slot("ai", on_waiting=_on_waiting)
-        except asyncio.CancelledError:
-            raise
+    # 全局 AI 预算守卫：NIM 下会按估算 token 把大请求拆成多个预算片，避免 RPM/TPM 瞬时尖峰。
+    try:
+        raw_mt = int((ctx["ai_cfg"] or {}).get("max_tokens") or 4096)
+    except (TypeError, ValueError):
+        raw_mt = 4096
+    prompt_chars = len(str(asset_dict)) + len(str(points[-60:] if len(points) > 60 else points)) + sum(len(p or "") for p in ctx["skill_prompts"])
+    try:
+        await ai_guard.acquire_ai_budget(
+            "analyzer",
+            ctx["ai_cfg"],
+            key="ai",
+            prompt_chars=prompt_chars,
+            max_tokens=max(1024, min(raw_mt, 8192)),
+            on_log=on_log,
+        )
+    except asyncio.CancelledError:
+        raise
 
     # 在线程池中执行同步的 OpenAI 调用，避免阻塞事件循环
+
     result = await asyncio.to_thread(
         run_agent,
         asset_dict, points, holding,
