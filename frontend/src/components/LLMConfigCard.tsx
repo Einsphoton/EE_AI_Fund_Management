@@ -41,7 +41,14 @@ export interface LLMConfigState {
   min_interval_sec?: number;
   /** NIM 友好优化：全局排队 + token 预算片，不裁剪模型能力 */
   nim_optimization_enabled?: boolean;
+  /** AI 成本控制：quality=质量优先 / balanced=均衡省钱 / economy=极省钱 */
+  cost_mode?: "quality" | "balanced" | "economy" | string;
+  /** JSON Mode：减少解释性废话和解析失败重试 */
+  json_mode?: boolean;
+  /** 记录服务端返回的 token usage / cache usage */
+  token_usage_logging?: boolean;
   cf_access_client_id?: string;    // 仅 AI 卡片维护，Vision 卡片复用 AI 的
+
 
   cf_access_client_secret?: string;
   cf_access_hosts?: string;
@@ -309,7 +316,72 @@ export default function LLMConfigCard({
 
       </div>
 
+      {/* ============ 成本控制（仅 ai 模式） ============ */}
+      {mode === "ai" && (
+        <div className="mt-4 rounded-lg border border-emerald2/25 bg-emerald2/5 p-3">
+          <div className="text-xs font-medium text-white/90 mb-2 flex items-center gap-2">
+            <Zap className="w-3.5 h-3.5 text-emerald2" />
+            成本控制 / Token 节省
+            <span className="text-[10px] text-muted font-normal ml-auto">适合 DeepSeek 付费 API 批量分析</span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 mb-3">
+            {([
+              { v: "quality", label: "质量优先", desc: "60日OHLC + 长点评，不复用" },
+              { v: "balanced", label: "均衡省钱", desc: "压缩行情，12小时内小波动复用" },
+              { v: "economy", label: "极省钱", desc: "短点评，24小时内小波动复用" },
+            ] as const).map((opt) => {
+              const active = (value.cost_mode || "quality") === opt.v;
+              return (
+                <button
+                  key={opt.v}
+                  type="button"
+                  className={`btn flex-col items-start text-left h-auto py-2 ${
+                    active ? "border-emerald2/60 bg-emerald2/15 text-white" : ""
+                  }`}
+                  onClick={() => set({ cost_mode: opt.v })}
+                  title={opt.desc}
+                >
+                  <div className="text-sm font-medium">{opt.label}</div>
+                  <div className="text-[10px] text-muted leading-tight">{opt.desc}</div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="grid grid-cols-2 gap-3 border-t border-line/40 pt-3">
+            <label className="inline-flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 accent-emerald-400"
+                checked={value.json_mode ?? true}
+                onChange={(e) => set({ json_mode: e.target.checked })}
+              />
+              <span>
+                <span className="block text-xs text-white/90 font-medium">启用 JSON Mode</span>
+                <span className="block text-[10px] text-muted mt-1 leading-relaxed">
+                  支持的服务会更稳定输出 JSON，减少解析失败和重试；不支持时后端会自动降级重试。
+                </span>
+              </span>
+            </label>
+            <label className="inline-flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 accent-emerald-400"
+                checked={value.token_usage_logging ?? true}
+                onChange={(e) => set({ token_usage_logging: e.target.checked })}
+              />
+              <span>
+                <span className="block text-xs text-white/90 font-medium">记录 Token 用量</span>
+                <span className="block text-[10px] text-muted mt-1 leading-relaxed">
+                  写入 AI 日志，便于观察 DeepSeek cache hit/miss 与每次分析的真实消耗。
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>
+      )}
+
       {/* ============ 思考 / Reasoning（仅 ai 模式） ============ */}
+
       {mode === "ai" && (
         <div className="mt-4 rounded-lg border border-line/60 bg-bg-soft/40 p-3">
           <div className="text-xs font-medium text-white/90 mb-2 flex items-center gap-2">

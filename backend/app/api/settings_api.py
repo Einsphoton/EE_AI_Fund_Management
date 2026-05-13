@@ -227,6 +227,53 @@ async def test_ai(p: TestAiPayload):
                     hint_parts.append(f"已从模型列表接口读取 {len(ids)} 个模型；不会再截断为前 50 个。")
                 if p.model and not model_ok:
                     hint_parts.append(f"Model `{p.model}` 不在可用列表中。请确认服务商返回的真实模型名。")
+
+                # 关键：/models 能通不代表这个 Key 可以真正调用该模型。
+                # NIM 可能出现模型列表可见，但 chat/completions 对该账号/Key 返回 401/429。
+                # 所以在填写了模型名且模型存在时，追加一次极小的真实推理探针。
+                if p.model and model_ok:
+                    chat_endpoint = f"{base}/chat/completions"
+                    try:
+                        r_chat = await client.post(
+                            chat_endpoint,
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={
+                                "model": p.model,
+                                "messages": [{"role": "user", "content": "ping"}],
+                                "temperature": 0,
+                                "max_tokens": 8,
+                            },
+                        )
+                        if r_chat.status_code == 200:
+                            hint_parts.append("真实 Chat Completions 探针通过。")
+                        else:
+                            return {
+                                "ok": False,
+                                "endpoint": chat_endpoint,
+                                "models": ids,
+                                "model_exists": model_ok,
+                                "error": f"模型列表可访问，但真实调用失败：HTTP {r_chat.status_code}: {r_chat.text[:300]}",
+                                "hint": "\n".join(hint_parts),
+                            }
+                    except httpx.TimeoutException:
+                        return {
+                            "ok": False,
+                            "endpoint": chat_endpoint,
+                            "models": ids,
+                            "model_exists": model_ok,
+                            "error": "模型列表可访问，但真实 Chat Completions 探针超时。",
+                            "hint": "\n".join(hint_parts),
+                        }
+                    except Exception as e:
+                        return {
+                            "ok": False,
+                            "endpoint": chat_endpoint,
+                            "models": ids,
+                            "model_exists": model_ok,
+                            "error": f"模型列表可访问，但真实 Chat Completions 探针失败：{e}",
+                            "hint": "\n".join(hint_parts),
+                        }
+
                 return {
                     "ok": True,
                     "endpoint": target,
@@ -234,6 +281,7 @@ async def test_ai(p: TestAiPayload):
                     "model_exists": model_ok,
                     "hint": "\n".join(hint_parts),
                 }
+
 
 
             # 仍然是重定向状态码 → 说明循环了或最终进了登录页

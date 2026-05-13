@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from datetime import timedelta
 from typing import Any, AsyncIterator, Callable, Iterable, Optional
+
 
 from sqlalchemy.orm import Session
 
@@ -63,16 +65,132 @@ def _load_batch_context(db: Session, user_id: int | None = None) -> dict[str, An
     }
 
 
-def _is_provider_retryable_fallback(result: dict[str, Any] | None) -> bool:
-    """run_agent 内部兜底为启发式结果时，允许换下一个 Provider 再试。"""
+def _provider_failure_kind(result: dict[str, Any] | None) -> str:
+    """run_agent 返回启发式兜底时，识别失败类型以便切换/冷却 Provider。"""
     if not isinstance(result, dict):
-        return True
-    skill_used = str(result.get("skill_used") or "").lower()
+        return "unknown"
     detail = str(result.get("detail") or "")
-    return skill_used == "fallback" and "[调用大模型失败]" in detail
+    if "[调用大模型失败]" not in detail:
+        return ""
+    low = detail.lower()
+    if "401" in detail or "403" in detail or "authenticationerror" in low or "unauthorized" in low:
+        return "auth"
+    if "429" in detail or "ratelimiterror" in low or "too many" in low:
+        return "rate_limit"
+    if "timeout" in low or "connection" in low or "连接" in detail:
+        return "transient"
+    return "unknown"
+
+
+def _cost_mode(ai_cfg: dict[str, Any] | None) -> str:
+    mode = str((ai_cfg or {}).get("cost_mode") or "quality").lower()
+    return mode if mode in {"quality", "balanced", "economy"} else "quality"
+
+
+def _reuse_policy(ai_cfg: dict[str, Any] | None) -> tuple[int, float]:
+    """返回 (复用小时数, 允许价格变化百分比)。quality 默认不复用。"""
+    mode = _cost_mode(ai_cfg)
+    defaults = {
+        "quality": (0, 0.0),
+        "balanced": (12, 1.5),
+        "economy": (24, 2.0),
+    }
+    hours, pct = defaults[mode]
+    try:
+        if "reuse_recent_advice_hours" in (ai_cfg or {}):
+            hours = int((ai_cfg or {}).get("reuse_recent_advice_hours") or 0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if "reuse_price_change_pct" in (ai_cfg or {}):
+            pct = float((ai_cfg or {}).get("reuse_price_change_pct") or 0)
+    except (TypeError, ValueError):
+        pass
+    return max(0, hours), max(0.0, pct)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_reusable_advice(
+    db: Session,
+    asset_id: int,
+    current_price: Any,
+    ai_cfg: dict[str, Any],
+) -> tuple[models.Advice | None, str]:
+    hours, price_change_pct = _reuse_policy(ai_cfg)
+    if hours <= 0:
+        return None, ""
+    cutoff = now_local() - timedelta(hours=hours)
+    latest = (
+        db.query(models.Advice)
+        .filter(models.Advice.asset_id == asset_id, models.Advice.created_at >= cutoff)
+        .order_by(models.Advice.created_at.desc())
+        .first()
+    )
+    if latest is None:
+        return None, ""
+    if "[调用大模型失败]" in str(latest.detail or "") or str(latest.skill_used or "").startswith("fallback"):
+        return None, "最近结果是兜底/失败结果，不复用"
+
+    current = _float_or_none(current_price)
+    extra = latest.extra or {}
+    previous = _float_or_none(extra.get("analysis_current_price") or extra.get("current_price"))
+    if current is not None and previous is not None and previous > 0 and price_change_pct > 0:
+        change = abs((current - previous) / previous * 100)
+        if change > price_change_pct:
+            return None, f"价格变化 {change:.2f}% 超过阈值 {price_change_pct:.2f}%"
+        return latest, f"{hours} 小时内已分析，价格变化 {change:.2f}% ≤ {price_change_pct:.2f}%"
+    return latest, f"{hours} 小时内已分析，复用近期结果"
+
+
+def _persist_reused_advice(
+    db: Session,
+    latest: models.Advice,
+    *,
+    asset_id: int,
+    batch_id: str,
+    source: str,
+    current_price: Any,
+    holding: dict[str, Any],
+    ai_cfg: dict[str, Any],
+    reason: str,
+) -> models.Advice:
+    extra = dict(latest.extra or {})
+    extra.update({
+        "reused": True,
+        "reused_from_advice_id": latest.id,
+        "reuse_reason": reason,
+        "analysis_current_price": current_price,
+        "analysis_profit_pct": holding.get("profit_pct"),
+        "cost_mode": _cost_mode(ai_cfg),
+    })
+    detail_prefix = f"【Token 节省】{reason}，本次未重新调用大模型。"
+    advice = models.Advice(
+        asset_id=asset_id,
+        batch_id=batch_id,
+        source=source,
+        action=latest.action,
+        confidence=latest.confidence,
+        summary=latest.summary,
+        detail=(detail_prefix + "\n\n" + str(latest.detail or "")).strip(),
+        extra=extra,
+        skill_used=(f"reused:{latest.skill_used}" if latest.skill_used else "reused")[:128],
+    )
+    db.add(advice)
+    db.commit()
+    db.refresh(advice)
+    return advice
 
 
 async def _analyze_one_core(
+
     db: Session,
 
     asset: models.Asset,
@@ -111,7 +229,41 @@ async def _analyze_one_core(
     current = quote.get("current_price")
     holding = holding_service.summarize(asset, current)
 
+    if source == "batch":
+        reusable, reuse_reason = _find_reusable_advice(db, asset.id, current, ctx["ai_cfg"])
+        if reusable is not None:
+            advice = _persist_reused_advice(
+                db,
+                reusable,
+                asset_id=asset.id,
+                batch_id=batch_id,
+                source=source,
+                current_price=current,
+                holding=holding,
+                ai_cfg=ctx["ai_cfg"],
+                reason=reuse_reason,
+            )
+            log_ai_event(
+                "analyzer",
+                "asset_analysis_reused",
+                batch_id=batch_id,
+                asset_id=asset.id,
+                reused_from_advice_id=reusable.id,
+                advice_id=advice.id,
+                reason=reuse_reason,
+                cost_mode=_cost_mode(ctx["ai_cfg"]),
+            )
+            if on_log is not None:
+                try:
+                    r = on_log(f"♻️ {reuse_reason}，复用上一条 AI 分析，节省本次模型调用。")
+                    if asyncio.iscoroutine(r):
+                        await r
+                except Exception:
+                    pass
+            return advice
+
     asset_dict = {
+
         "name": asset.name, "code": asset.code,
         "asset_type": asset.asset_type.value, "market": asset.market.value,
         "platform": asset.platform, "watch_only": asset.watch_only,
@@ -133,10 +285,14 @@ async def _analyze_one_core(
 
     for idx, provider_cfg in enumerate(provider_sequence):
         provider_label = ai_provider_pool.provider_label(provider_cfg)
+        runtime = ai_provider_pool.reserve_provider(provider_cfg)
         attempted_provider_labels.append(provider_label)
         if on_log is not None and len(provider_sequence) > 1:
             try:
-                r = on_log(f"🔁 使用 AI Provider：{provider_label}（{idx + 1}/{len(provider_sequence)}）")
+                r = on_log(
+                    f"🔁 使用 AI Provider：{provider_label}（{idx + 1}/{len(provider_sequence)}，"
+                    f"当前运行中 {runtime.get('inflight', 0)}）"
+                )
                 if asyncio.iscoroutine(r):
                     await r
             except Exception:
@@ -149,34 +305,65 @@ async def _analyze_one_core(
             provider=provider_label,
             provider_index=idx + 1,
             provider_total=len(provider_sequence),
+            provider_runtime=runtime,
             config=safe_ai_config(provider_cfg),
         )
 
-        # 全局 AI 预算守卫：每个 Provider 使用独立 key，因此多个合法 API Key 可各自按 RPM 排队。
         try:
-            raw_mt = int((provider_cfg or {}).get("max_tokens") or 4096)
-        except (TypeError, ValueError):
-            raw_mt = 4096
-        try:
-            _ = await ai_guard.acquire_ai_budget(
-                "analyzer",
-                provider_cfg,
-                key=ai_provider_pool.provider_rate_key(provider_cfg),
-                prompt_chars=prompt_chars,
-                max_tokens=max(1024, min(raw_mt, 8192)),
-                on_log=on_log,
+            # 全局 AI 预算守卫：每个 Provider 使用独立 key，因此多个合法 API Key 可各自按 RPM 排队。
+            try:
+                raw_mt = int((provider_cfg or {}).get("max_tokens") or 4096)
+            except (TypeError, ValueError):
+                raw_mt = 4096
+            try:
+                _ = await ai_guard.acquire_ai_budget(
+                    "analyzer",
+                    provider_cfg,
+                    key=ai_provider_pool.provider_rate_key(provider_cfg),
+                    prompt_chars=prompt_chars,
+                    max_tokens=max(1024, min(raw_mt, 8192)),
+                    on_log=on_log,
+                )
+            except asyncio.CancelledError:
+                raise
+
+            # 在线程池中执行同步的 OpenAI 调用，避免阻塞事件循环
+            result = await asyncio.to_thread(
+                run_agent,
+                asset_dict, points, holding,
+                ctx["skill_prompts"], provider_cfg, ctx["skill_label"],
             )
+        finally:
+            ai_provider_pool.release_provider(provider_cfg)
 
-        except asyncio.CancelledError:
-            raise
+        failure_kind = _provider_failure_kind(result)
+        if not failure_kind:
+            ai_provider_pool.clear_provider_cooldown(provider_cfg)
+            break
 
-        # 在线程池中执行同步的 OpenAI 调用，避免阻塞事件循环
-        result = await asyncio.to_thread(
-            run_agent,
-            asset_dict, points, holding,
-            ctx["skill_prompts"], provider_cfg, ctx["skill_label"],
+        cooldown_sec = 6 * 3600 if failure_kind == "auth" else (180.0 if failure_kind == "rate_limit" else 45.0)
+        ai_provider_pool.mark_provider_unhealthy(
+            provider_cfg,
+            cooldown_sec=cooldown_sec,
+            reason=failure_kind,
         )
-        if not _is_provider_retryable_fallback(result) or idx == len(provider_sequence) - 1:
+        if failure_kind == "rate_limit":
+            await rl_mod.limiter.penalize(
+                ai_provider_pool.provider_rate_key(provider_cfg),
+                pause_sec=120.0,
+                reason="provider 429 fallback",
+            )
+        log_ai_event(
+            "analyzer",
+            "provider_unhealthy",
+            level="warning",
+            batch_id=batch_id,
+            asset_id=asset.id,
+            provider=provider_label,
+            failure_kind=failure_kind,
+            cooldown_sec=cooldown_sec,
+        )
+        if idx == len(provider_sequence) - 1:
             break
         log_ai_event(
             "analyzer",
@@ -185,15 +372,17 @@ async def _analyze_one_core(
             batch_id=batch_id,
             asset_id=asset.id,
             failed_provider=provider_label,
+            failure_kind=failure_kind,
             next_provider=ai_provider_pool.provider_label(provider_sequence[idx + 1]),
         )
         if on_log is not None:
             try:
-                r = on_log(f"⚠️ {provider_label} 调用失败，切换到下一个 AI Provider…")
+                r = on_log(f"⚠️ {provider_label} 调用失败（{failure_kind}），切换到下一个 AI Provider…")
                 if asyncio.iscoroutine(r):
                     await r
             except Exception:
                 pass
+
 
     if result is None:
         result = run_agent(asset_dict, points, holding, ctx["skill_prompts"], ctx["ai_cfg"], ctx["skill_label"])
@@ -206,7 +395,13 @@ async def _analyze_one_core(
                   "time_horizon", "target_price", "stop_loss", "provider_used")
 
     extra = {k: result.get(k) for k in extra_keys if k in result}
+    extra.update({
+        "analysis_current_price": current,
+        "analysis_profit_pct": holding.get("profit_pct"),
+        "cost_mode": _cost_mode(ctx["ai_cfg"]),
+    })
     advice = models.Advice(
+
         asset_id=asset.id,
         batch_id=batch_id,
         source=source,

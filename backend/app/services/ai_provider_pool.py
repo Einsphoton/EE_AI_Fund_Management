@@ -7,11 +7,18 @@ rate-limit key so independent API quotas can be used safely.
 from __future__ import annotations
 
 import threading
+import time
 from copy import deepcopy
 from typing import Any
 
 _POOL_LOCK = threading.Lock()
 _POOL_CURSOR: dict[str, int] = {}
+_PROVIDER_COOLDOWN_UNTIL: dict[str, float] = {}
+_PROVIDER_COOLDOWN_REASON: dict[str, str] = {}
+_PROVIDER_INFLIGHT: dict[str, int] = {}
+_PROVIDER_SELECTED_COUNT: dict[str, int] = {}
+
+
 
 _PROVIDER_OVERRIDE_KEYS = {
     "id",
@@ -122,33 +129,121 @@ def provider_count(ai_cfg: dict[str, Any] | None) -> int:
     return len([p for p in build_provider_pool(ai_cfg) if _has_endpoint(p)])
 
 
-def choose_provider_sequence(ai_cfg: dict[str, Any] | None, *, purpose: str = "asset-analysis") -> list[dict[str, Any]]:
-    """Pick a weighted round-robin start provider, then append failover candidates."""
-    pool = build_provider_pool(ai_cfg)
-    if len(pool) <= 1:
-        return pool
+def cooldown_remaining(cfg: dict[str, Any] | None) -> float:
+    cfg = cfg or {}
+    pid = str(cfg.get("_provider_id") or "")
+    if not pid:
+        return 0.0
+    with _POOL_LOCK:
+        until = _PROVIDER_COOLDOWN_UNTIL.get(pid, 0.0)
+    return max(0.0, until - time.time())
 
-    weighted: list[dict[str, Any]] = []
-    for p in pool:
-        weighted.extend([p] * _as_positive_int(p.get("_provider_weight"), 1))
-    if not weighted:
+
+def cooldown_reason(cfg: dict[str, Any] | None) -> str:
+    cfg = cfg or {}
+    pid = str(cfg.get("_provider_id") or "")
+    with _POOL_LOCK:
+        return _PROVIDER_COOLDOWN_REASON.get(pid, "")
+
+
+def mark_provider_unhealthy(cfg: dict[str, Any] | None, *, cooldown_sec: float, reason: str) -> None:
+    cfg = cfg or {}
+    pid = str(cfg.get("_provider_id") or "")
+    if not pid or cooldown_sec <= 0:
+        return
+    with _POOL_LOCK:
+        _PROVIDER_COOLDOWN_UNTIL[pid] = max(_PROVIDER_COOLDOWN_UNTIL.get(pid, 0.0), time.time() + cooldown_sec)
+        _PROVIDER_COOLDOWN_REASON[pid] = reason
+
+
+def clear_provider_cooldown(cfg: dict[str, Any] | None) -> None:
+    cfg = cfg or {}
+    pid = str(cfg.get("_provider_id") or "")
+    if not pid:
+        return
+    with _POOL_LOCK:
+        _PROVIDER_COOLDOWN_UNTIL.pop(pid, None)
+        _PROVIDER_COOLDOWN_REASON.pop(pid, None)
+
+
+def _provider_id(cfg: dict[str, Any] | None) -> str:
+    cfg = cfg or {}
+    return str(cfg.get("_provider_id") or "")
+
+
+def provider_runtime_status(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    pid = _provider_id(cfg)
+    now = time.time()
+    with _POOL_LOCK:
+        until = _PROVIDER_COOLDOWN_UNTIL.get(pid, 0.0)
+        return {
+            "inflight": _PROVIDER_INFLIGHT.get(pid, 0),
+            "selected_count": _PROVIDER_SELECTED_COUNT.get(pid, 0),
+            "cooldown_remaining": max(0.0, until - now),
+            "cooldown_reason": _PROVIDER_COOLDOWN_REASON.get(pid, ""),
+        }
+
+
+
+def reserve_provider(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    pid = _provider_id(cfg)
+    if not pid:
+        return {"inflight": 0, "selected_count": 0}
+    with _POOL_LOCK:
+        _PROVIDER_INFLIGHT[pid] = _PROVIDER_INFLIGHT.get(pid, 0) + 1
+        _PROVIDER_SELECTED_COUNT[pid] = _PROVIDER_SELECTED_COUNT.get(pid, 0) + 1
+        return {
+            "inflight": _PROVIDER_INFLIGHT[pid],
+            "selected_count": _PROVIDER_SELECTED_COUNT[pid],
+        }
+
+
+def release_provider(cfg: dict[str, Any] | None) -> None:
+    pid = _provider_id(cfg)
+    if not pid:
+        return
+    with _POOL_LOCK:
+        cur = _PROVIDER_INFLIGHT.get(pid, 0)
+        if cur <= 1:
+            _PROVIDER_INFLIGHT.pop(pid, None)
+        else:
+            _PROVIDER_INFLIGHT[pid] = cur - 1
+
+
+def choose_provider_sequence(ai_cfg: dict[str, Any] | None, *, purpose: str = "asset-analysis") -> list[dict[str, Any]]:
+    """Choose providers by least in-flight load + weighted fair count.
+
+    This is intentionally not pure round-robin: long NIM generations can keep a
+    key busy for 1-3 minutes. New assets should prefer idle keys first, then use
+    weighted selected-count as a fairness tie-breaker.
+    """
+    pool = build_provider_pool(ai_cfg)
+    active_pool = [p for p in pool if cooldown_remaining(p) <= 0]
+    if active_pool:
+        pool = active_pool
+    if len(pool) <= 1:
         return pool
 
     cursor_key = purpose
     with _POOL_LOCK:
-        i = _POOL_CURSOR.get(cursor_key, 0) % len(weighted)
-        _POOL_CURSOR[cursor_key] = i + 1
-    start_id = weighted[i].get("_provider_id")
+        cursor = _POOL_CURSOR.get(cursor_key, 0)
+        _POOL_CURSOR[cursor_key] = cursor + 1
+        decorated: list[tuple[float, float, int, dict[str, Any]]] = []
+        size = len(pool)
+        for pos, p in enumerate(pool):
+            pid = str(p.get("_provider_id") or "")
+            weight = _as_positive_int(p.get("_provider_weight"), 1)
+            inflight = _PROVIDER_INFLIGHT.get(pid, 0)
+            selected = _PROVIDER_SELECTED_COUNT.get(pid, 0)
+            rotated_pos = (pos - cursor) % size
+            decorated.append((inflight / weight, selected / weight, rotated_pos, p))
+    decorated.sort(key=lambda x: (x[0], x[1], x[2]))
+    return [p for *_score, p in decorated]
 
-    start_index = 0
-    for idx, p in enumerate(pool):
-        if p.get("_provider_id") == start_id:
-            start_index = idx
-            break
-    return pool[start_index:] + pool[:start_index]
 
 
 def provider_label(cfg: dict[str, Any] | None) -> str:
+
     cfg = cfg or {}
     return str(cfg.get("_provider_name") or cfg.get("_provider_id") or "AI").strip() or "AI"
 

@@ -208,7 +208,13 @@ export interface AdviceExtra {
   advice?: string;
   /** AI 深度点评：自由发挥的 Markdown 长文，是分析报告的主观核心。 */
   commentary?: string;
+  /** 是否复用了近期 AI 分析结果以节省 token。 */
+  reused?: boolean;
+  reused_from_advice_id?: number;
+  reuse_reason?: string;
+  cost_mode?: string;
   /** 本次资产分析实际使用的 AI Provider 名称。 */
+
   provider_used?: string;
   time_horizon?: "short" | "mid" | "long" | string;
 
@@ -347,7 +353,14 @@ export interface AppSettings {
     min_interval_sec?: number;
     /** NIM 友好优化：通过全局排队和 token 预算片平滑限流，不裁剪模型能力。 */
     nim_optimization_enabled?: boolean;
+    /** AI 成本控制：quality=质量优先 / balanced=均衡省钱 / economy=极省钱 */
+    cost_mode?: "quality" | "balanced" | "economy" | string;
+    /** 强制 JSON Mode，减少废话和 JSON 解析失败重试。 */
+    json_mode?: boolean;
+    /** 记录模型返回的 token usage/cache usage 日志。 */
+    token_usage_logging?: boolean;
     /** 投资者性格 id：balanced / conservative / aggressive / income / growth / value / trader */
+
 
     investor_profile?: string;
     /** 报告风格 id：pro / beginner */

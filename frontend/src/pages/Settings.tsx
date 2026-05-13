@@ -121,7 +121,9 @@ export default function SettingsPage() {
     base_url: "", api_key: "", model: "",
     temperature: 0.4, batch_concurrency: 2, max_tokens: 4096, timeout: 180,
     rpm_limit: 0, min_interval_sec: 0, nim_optimization_enabled: true,
+    cost_mode: "quality", json_mode: true, token_usage_logging: true,
     investor_profile: "balanced", report_style: "pro",
+
 
     cf_access_client_id: "", cf_access_client_secret: "", cf_access_hosts: "",
     thinking_mode: "auto", thinking_budget: 0, reasoning_effort: "medium",
@@ -163,7 +165,11 @@ export default function SettingsPage() {
       rpm_limit: data.ai.rpm_limit ?? 0,
       min_interval_sec: data.ai.min_interval_sec ?? 0,
       nim_optimization_enabled: data.ai.nim_optimization_enabled ?? true,
+      cost_mode: data.ai.cost_mode ?? "quality",
+      json_mode: data.ai.json_mode ?? true,
+      token_usage_logging: data.ai.token_usage_logging ?? true,
       investor_profile: data.ai.investor_profile ?? "balanced",
+
 
       report_style: data.ai.report_style ?? "pro",
       cf_access_client_id: data.ai.cf_access_client_id ?? "",
@@ -235,7 +241,11 @@ export default function SettingsPage() {
     max_tokens: ai.max_tokens, timeout: ai.timeout,
     rpm_limit: ai.rpm_limit, min_interval_sec: ai.min_interval_sec,
     nim_optimization_enabled: ai.nim_optimization_enabled,
+    cost_mode: ai.cost_mode,
+    json_mode: ai.json_mode,
+    token_usage_logging: ai.token_usage_logging,
     cf_access_client_id: ai.cf_access_client_id,
+
 
     cf_access_client_secret: ai.cf_access_client_secret,
     cf_access_hosts: ai.cf_access_hosts,
@@ -859,13 +869,15 @@ function AIProviderPoolCard({ ai, setAi }: { ai: AIState; setAi: (v: AIState) =>
         cf_access_hosts: ai.cf_access_hosts,
       });
       const modelHint = model ? (r.model_exists ? `模型存在：${model}` : `模型不在列表中：${model}`) : "已连接，可从模型列表选择";
+      const ok = !!r.ok && (r.model_exists !== false);
       setTestResults((prev) => ({
         ...prev,
         [p.id]: {
-          ok: !!r.ok && (r.model_exists !== false),
-          text: `${modelHint}${r.models?.length ? `；返回 ${r.models.length} 个模型` : ""}${r.hint ? `\n${r.hint}` : ""}`,
+          ok,
+          text: `${modelHint}${r.models?.length ? `；返回 ${r.models.length} 个模型` : ""}${r.hint ? `\n${r.hint}` : ""}${r.error ? `\n${r.error}` : ""}`,
         },
       }));
+
     } catch (e: any) {
       setTestResults((prev) => ({ ...prev, [p.id]: { ok: false, text: e.message || "测试失败" } }));
     } finally {

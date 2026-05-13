@@ -112,7 +112,124 @@ def _get_openai_client(base_url: str, api_key: str, timeout_sec: int, ai_config:
 
 
 
+
+
+_COST_PROFILES: dict[str, dict[str, Any]] = {
+    "quality": {
+        "label": "质量优先",
+        "quote_points": 60,
+        "quote_format": "ohlc",
+        "commentary_range": "250-450 字",
+        "commentary_min": 150,
+        "advice_range": "60-100 字",
+        "max_tokens": 4096,
+        "min_tokens": 4096,
+        "force_thinking_off": False,
+    },
+    "balanced": {
+        "label": "均衡省钱",
+        "quote_points": 45,
+        "quote_format": "close",
+        "commentary_range": "160-280 字",
+        "commentary_min": 100,
+        "advice_range": "40-80 字",
+        "max_tokens": 2500,
+        "min_tokens": 1200,
+        "force_thinking_off": True,
+    },
+    "economy": {
+        "label": "极省钱",
+        "quote_points": 30,
+        "quote_format": "close",
+        "commentary_range": "80-160 字",
+        "commentary_min": 60,
+        "advice_range": "30-60 字",
+        "max_tokens": 1600,
+        "min_tokens": 900,
+        "force_thinking_off": True,
+    },
+}
+
+
+def _resolve_cost_profile(ai_config: dict[str, Any] | None) -> dict[str, Any]:
+    mode = str((ai_config or {}).get("cost_mode") or "quality").lower()
+    if mode not in _COST_PROFILES:
+        mode = "quality"
+    profile = dict(_COST_PROFILES[mode])
+    profile["mode"] = mode
+    return profile
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _quote_metrics(points: list[dict], holding: dict) -> str:
+    closes = [_safe_float(p.get("close")) for p in points]
+    closes = [c for c in closes if c is not None]
+    if not closes:
+        return "- 无可用收盘价统计"
+    last = closes[-1]
+    lines = [f"- 最新收盘价: {last:.4g}"]
+    for days in (5, 20, 60):
+        if len(closes) > days and closes[-days] not in (None, 0):
+            pct = (last - closes[-days]) / closes[-days] * 100
+            lines.append(f"- 近{days}日涨跌幅: {pct:.2f}%")
+    if len(closes) >= 20:
+        ma20 = sum(closes[-20:]) / 20
+        lines.append(f"- 20日均价: {ma20:.4g}，当前{'高于' if last >= ma20 else '低于'}20日均价")
+    avg_cost = _safe_float(holding.get("avg_cost"))
+    if avg_cost and avg_cost > 0:
+        cost_pct = (last - avg_cost) / avg_cost * 100
+        lines.append(f"- 当前价相对平均成本: {cost_pct:.2f}%")
+    return "\n".join(lines)
+
+
+def _format_quote_points(points: list[dict], profile: dict[str, Any]) -> tuple[str, int, str]:
+    limit = int(profile.get("quote_points") or 60)
+    quote_format = str(profile.get("quote_format") or "ohlc")
+    selected = points[-limit:] if len(points) > limit else points
+    if quote_format == "close":
+        text = "\n".join(f"{p.get('date')} C={p.get('close')}" for p in selected)
+        label = f"近 {len(selected)} 个交易日收盘价（升序）"
+    else:
+        text = "\n".join(
+            f"{p.get('date')} O={p.get('open')} H={p.get('high')} L={p.get('low')} C={p.get('close')}"
+            for p in selected
+        )
+        label = f"近 {len(selected)} 个交易日 OHLC 行情（升序）"
+    return text, len(selected), label
+
+
+def _cost_instruction(profile: dict[str, Any]) -> str:
+    mode = profile.get("mode") or "quality"
+    label = profile.get("label") or "质量优先"
+    commentary_range = profile.get("commentary_range") or "250-450 字"
+    commentary_min = profile.get("commentary_min") or 150
+    advice_range = profile.get("advice_range") or "60-100 字"
+    if mode == "economy":
+        style = "只保留最高价值判断，优先用短段落或项目符号；不要铺陈背景。"
+    elif mode == "balanced":
+        style = "结论要完整但克制，少写套话，重点写动作、触发条件和主要风险。"
+    else:
+        style = "可以充分展开，但仍要避免空泛套话。"
+    return (
+        "### 成本控制 / Token 节省模式（必须优先于通用长度要求）\n"
+        f"当前模式：{label}（{mode}）。\n"
+        f"- advice 控制在 {advice_range}。\n"
+        f"- commentary 控制在 {commentary_range}，且不得少于 {commentary_min} 字。\n"
+        f"- 写作策略：{style}\n"
+        "- 即使是省钱模式，也必须保留 action、summary、profile_note、关键风险和可执行操作。"
+    )
+
+
 SYSTEM_PROMPT = (
+
     "你是名为 Hermes-Lite 的本地金融分析 Agent。\n"
     "你会接收若干个已安装的 Skill 提示，组合成一个综合分析专家。\n"
     "请严格输出结构化 JSON，不得有任何 JSON 之外的文字。\n"
@@ -166,7 +283,7 @@ SYSTEM_PROMPT = (
     "- advice 和 commentary 字段里的 Markdown 是字符串值的一部分，换行写成 \\n，\" 转义成 \\\"，保证 JSON 合法。\n"
     "- summary 字段必须独立成章、不能为空字符串——否则会被视为分析失败。\n"
     "- profile_note 不能为空，必须点名当前投资者性格下的优化逻辑。\n"
-    "- commentary 不能为空且不能少于 150 字——它是这次分析的核心交付物。\n"
+    "- commentary 不能为空，且不能低于当前成本模式规定的最低字数——它是这次分析的核心交付物。\n"
     "- risks / pros 每项 20 字以内，共 2-4 条。\n"
     "- 若信息不足，target_price / stop_loss 填 null，不要瞎猜。"
 )
@@ -179,7 +296,9 @@ def build_prompt(
     skill_prompts: list[str],
     investor_profile_prompt: str = "",
     report_style_prompt: str = "",
+    cost_profile: dict[str, Any] | None = None,
 ) -> list[dict]:
+
     """组装 messages.
 
     在 SYSTEM 段里按顺序拼上：
@@ -187,20 +306,22 @@ def build_prompt(
       2) 投资者性格（若有）——决定判断倾向（稳健/进攻/收息/成长 ...）
       3) 报告风格（若有）——决定用词（专业术语 or 大白话）
     """
+    cost_profile = cost_profile or dict(_COST_PROFILES["quality"], mode="quality")
     skills_block = "\n\n".join([f"# Skill {i+1}\n{p}" for i, p in enumerate(skill_prompts) if p])
+    quotes_text, _, quote_label = _format_quote_points(points, cost_profile)
 
-    last_60 = points[-60:] if len(points) > 60 else points
-    quotes_text = "\n".join(
-        f"{p['date']}  O={p.get('open')}  H={p.get('high')}  L={p.get('low')}  C={p['close']}"
-        for p in last_60
-    )
+    metrics_text = _quote_metrics(points, holding)
 
-    system_parts = [SYSTEM_PROMPT]
+    system_parts = [SYSTEM_PROMPT, _cost_instruction(cost_profile)]
     if investor_profile_prompt:
         system_parts.append("### 投资者性格（必须遵守，它会直接影响 action/summary/advice/commentary/profile_note/止盈止损）\n" + investor_profile_prompt)
     if report_style_prompt:
         system_parts.append("### 报告风格（影响 summary/advice/risks/pros 的用词）\n" + report_style_prompt)
+    if skills_block:
+        # 固定 Skill 提示前置到 system，批量分析 DeepSeek 等服务时更容易命中上下文缓存。
+        system_parts.append("### 已加载的 Skill（必须融合这些视角）\n" + skills_block)
     system_msg = "\n\n".join(system_parts)
+
 
     feature_labels = {
         "note": "备注",
@@ -232,9 +353,10 @@ def build_prompt(
         f"- 平均成本: {holding.get('avg_cost')}\n"
         f"- 当前价: {holding.get('current_price')}\n"
         f"- 浮动盈亏: {holding.get('profit')}  ({holding.get('profit_pct')}%)\n\n"
-        f"## 近 60 个交易日行情（升序）\n{quotes_text}\n\n"
-        f"## 已加载的 Skill\n{skills_block}\n\n"
-        f"请基于以上 Skill 的视角融合给出最终结论，严格按 SYSTEM 的 JSON 模式输出。"
+        f"## 行情统计摘要\n{metrics_text}\n\n"
+        f"## {quote_label}\n{quotes_text}\n\n"
+        f"请基于 SYSTEM 中的 Skill 视角融合给出最终结论，严格按 SYSTEM 的 JSON 模式输出。"
+
     )
 
     return [
@@ -607,8 +729,13 @@ def run_agent(
     api_key = (ai_config or {}).get("api_key") or ""
     model = (ai_config or {}).get("model") or "deepseek-chat"
     temperature = float((ai_config or {}).get("temperature", 0.4))
+    cost_profile = _resolve_cost_profile(ai_config)
+    cost_mode = str(cost_profile.get("mode") or "quality")
+    json_mode = bool((ai_config or {}).get("json_mode", True))
+    token_usage_logging = bool((ai_config or {}).get("token_usage_logging", True))
 
     # ==== 思考 / Reasoning 控制（兼容 2026 主流模型协议）====
+
     # thinking_mode: "auto" | "on" | "off"
     #   - auto: 不传任何思考参数（默认行为，最不易踩坑）
     #   - on:   显式强制开启（DeepSeek V4 / Qwen3.5 / GLM-5 等 hybrid 模型生效）
@@ -623,8 +750,21 @@ def run_agent(
     reasoning_effort = str((ai_config or {}).get("reasoning_effort") or "").lower()
     if reasoning_effort not in ("", "minimal", "low", "medium", "high"):
         reasoning_effort = "medium"
+    if cost_profile.get("force_thinking_off") and thinking_mode == "on":
+        log_ai_event(
+            "hermes",
+            "thinking_disabled_by_cost_mode",
+            old_thinking_mode=thinking_mode,
+            cost_mode=cost_mode,
+        )
+        # 省钱模式只关闭“显式强制思考”，不主动发送 enable_thinking=false，
+        # 避免 DeepSeek/OpenAI-compatible 严格服务因未知字段拒绝请求。
+        thinking_mode = "auto"
+        reasoning_effort = ""
+
 
     # 可配置超时
+
     try:
         timeout_sec = int((ai_config or {}).get("timeout") or 180)
     except (TypeError, ValueError):
@@ -641,25 +781,49 @@ def run_agent(
         timeout_sec = 240
 
 
-    # max_tokens 下限：思考开 → 8192；思考关/auto → 4096
-    REASONING_FLOOR = 8192 if thinking_mode == "on" else 4096
-    try:
-        raw_mt = (ai_config or {}).get("max_tokens")
-        if raw_mt is None or raw_mt == "":
-            max_tokens = REASONING_FLOOR
+    # max_tokens：质量模式沿用原来的安全下限；省钱模式改为模式上限，避免长输出烧钱。
+    raw_mt = (ai_config or {}).get("max_tokens")
+    if cost_mode == "quality":
+        reasoning_floor = 8192 if thinking_mode == "on" else 4096
+        try:
+            if raw_mt is None or raw_mt == "":
+                max_tokens = reasoning_floor
+            else:
+                max_tokens = int(raw_mt)
+        except (TypeError, ValueError):
+            max_tokens = reasoning_floor
+        if 0 < max_tokens < reasoning_floor:
+            log_ai_event(
+                "hermes",
+                "max_tokens_auto_raised",
+                old_max_tokens=max_tokens,
+                new_max_tokens=reasoning_floor,
+                thinking_mode=thinking_mode,
+            )
+            max_tokens = reasoning_floor
+    else:
+        mode_default = int(cost_profile.get("max_tokens") or 2500)
+        mode_floor = int(cost_profile.get("min_tokens") or 900)
+        try:
+            requested = int(raw_mt) if raw_mt not in (None, "") else 0
+        except (TypeError, ValueError):
+            requested = 0
+        original_requested = requested
+        if requested <= 0:
+            max_tokens = mode_default
         else:
-            max_tokens = int(raw_mt)
-    except (TypeError, ValueError):
-        max_tokens = REASONING_FLOOR
-    if 0 < max_tokens < REASONING_FLOOR:
-        log_ai_event(
-            "hermes",
-            "max_tokens_auto_raised",
-            old_max_tokens=max_tokens,
-            new_max_tokens=REASONING_FLOOR,
-            thinking_mode=thinking_mode,
-        )
-        max_tokens = REASONING_FLOOR
+            max_tokens = max(mode_floor, min(requested, mode_default))
+        if max_tokens != original_requested:
+            log_ai_event(
+                "hermes",
+                "max_tokens_adjusted_by_cost_mode",
+                requested_max_tokens=original_requested,
+                effective_max_tokens=max_tokens,
+                cost_mode=cost_mode,
+            )
+
+
+
 
 
     # 把投资性格 + 报告风格注入 system prompt，并把性格元信息随分析结果落库。
@@ -696,8 +860,10 @@ def run_agent(
     # - JSON 解析失败：立即再试一次（reasoning 模型偶尔会输出不全）
     # - 业务错误（401/400 等）：不重试
     import time as _time
-    MAX_ATTEMPTS = 4
+    provider_pool_mode = bool((ai_config or {}).get("_provider_pool"))
+    MAX_ATTEMPTS = 2 if provider_pool_mode else 4
     started_at = _time.perf_counter()
+
     log_ai_event(
         "hermes",
         "asset_analysis_start",
@@ -729,6 +895,8 @@ def run_agent(
             }
             if max_tokens > 0:
                 kwargs["max_tokens"] = max_tokens
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
 
             # ==== 思考参数透传（同时发多套，兼容不同厂家）====
             # 思路：服务端不认识的字段 OpenAI SDK 会放进请求体，多数兼容服务直接忽略。
@@ -754,7 +922,28 @@ def run_agent(
             if extra_body:
                 kwargs["extra_body"] = extra_body
             resp = client.chat.completions.create(**kwargs)
+            if token_usage_logging:
+                try:
+                    usage = getattr(resp, "usage", None)
+                    usage_data = {}
+                    if usage is not None:
+                        if hasattr(usage, "model_dump"):
+                            usage_data = usage.model_dump()
+                        elif isinstance(usage, dict):
+                            usage_data = dict(usage)
+                    if usage_data:
+
+                        log_ai_event(
+                            "hermes",
+                            "asset_analysis_token_usage",
+                            model=model,
+                            cost_mode=cost_mode,
+                            usage=usage_data,
+                        )
+                except Exception:
+                    pass
             choice = resp.choices[0] if resp.choices else None
+
             msg = choice.message if choice else None
             finish_reason = (getattr(choice, "finish_reason", "") or "") if choice else ""
             text = (getattr(msg, "content", "") or "") if msg else ""
@@ -828,8 +1017,25 @@ def run_agent(
             )
             is_retryable = is_429 or is_5xx or is_conn
             kind = "429 限流" if is_429 else ("5xx 网关错" if is_5xx else ("连接错" if is_conn else "其他"))
+            is_json_mode_error = json_mode and (
+                "response_format" in err_low
+                or "json_object" in err_low
+                or "json mode" in err_low
+            )
+            if is_json_mode_error and attempt + 1 < MAX_ATTEMPTS:
+                log_ai_event(
+                    "hermes",
+                    "json_mode_unsupported_retry_without",
+                    level="warning",
+                    attempt=attempt + 1,
+                    error_type=err_type,
+                    error=err_str[:1000],
+                )
+                json_mode = False
+                continue
             log_ai_event(
                 "hermes",
+
                 "asset_analysis_attempt_failed",
                 level="warning" if is_retryable else "error",
                 attempt=attempt + 1,
@@ -846,7 +1052,12 @@ def run_agent(
 
                 # 业务错误（401/400/模型不存在等）不重试
                 break
+            if provider_pool_mode and is_429:
+                # 多 Provider 场景下，429 继续打同一个 Key 只会扩大限流；
+                # 立即返回兜底结果给 analyzer，让它冷却当前 Provider 并切换下一个。
+                break
             if attempt + 1 < MAX_ATTEMPTS:
+
                 # 退避：429 / 5xx 一般是后端拥塞或限流，前几次等久点让队列消化
                 # 1.5 / 4 / 9 / 20s（最多 4 次尝试）
                 backoffs = [1.5, 4.0, 9.0, 20.0]

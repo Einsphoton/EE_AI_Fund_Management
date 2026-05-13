@@ -41,7 +41,18 @@ DEFAULTS: dict[str, Any] = {
         # NIM 友好优化：不降低模型能力，只通过全局排队/预算片平滑 RPM/TPM/并发尖峰。
         # 关闭后按用户填写的 rpm_limit/min_interval 原样执行。
         "nim_optimization_enabled": True,
+        # ==== 成本控制 / Token 节省 ====
+        # cost_mode:
+        #   quality  - 质量优先：保持 60 日 OHLC + 长点评，不复用近期结果
+        #   balanced - 均衡省钱：压缩行情和输出，批量分析可复用 12 小时内小波动结果
+        #   economy  - 极省钱：更短行情和点评，批量分析可复用 24 小时内小波动结果
+        "cost_mode": "quality",
+        # 对支持的 OpenAI-compatible 服务启用 JSON Mode，减少废话和解析失败重试。
+        "json_mode": True,
+        # 是否记录 usage token（包括 DeepSeek cache hit/miss 字段，若服务端返回）。
+        "token_usage_logging": True,
         # ==== 思考 / Reasoning 控制（统一抽象，兼容 2026 年主流大模型）====
+
 
         # thinking_mode:
         #   "auto"  - 不显式传任何思考参数，让模型按默认行为运行（推荐）
@@ -171,7 +182,18 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+def _with_defaults(key: str, value: Any) -> Any:
+    """对 dict 类型设置做浅合并，避免旧数据库行缺少新增配置项时前端读不到默认值。"""
+    default = DEFAULTS.get(key)
+    if isinstance(default, dict) and isinstance(value, dict):
+        merged = deepcopy(default)
+        merged.update(value)
+        return merged
+    return value
+
+
 def current_user_id(db: Session, user_id: int | None = None) -> int | None:
+
     if user_id is not None:
         return user_id
     try:
@@ -190,7 +212,8 @@ def get(db: Session, key: str, user_id: int | None = None) -> Any:
     row = db.query(models.AppSetting).filter_by(key=scoped_key(key, uid)).first()
     if row is None:
         return deepcopy(DEFAULTS.get(key))
-    return row.value
+    return _with_defaults(key, row.value)
+
 
 
 def get_all(db: Session, user_id: int | None = None) -> dict[str, Any]:
@@ -204,7 +227,8 @@ def get_all(db: Session, user_id: int | None = None) -> dict[str, Any]:
         return out
     for row in db.query(models.AppSetting).all():
         if not str(row.key).startswith("u:"):
-            out[row.key] = row.value
+            out[row.key] = _with_defaults(row.key, row.value)
+
     return out
 
 
@@ -212,11 +236,18 @@ def set_value(db: Session, key: str, value: Any, user_id: int | None = None) -> 
     uid = current_user_id(db, user_id)
     target_key = scoped_key(key, uid)
     row = db.query(models.AppSetting).filter_by(key=target_key).first()
+    stored_value = value
+    if isinstance(value, dict) and isinstance(DEFAULTS.get(key), dict):
+        base = _with_defaults(key, row.value) if row is not None else deepcopy(DEFAULTS.get(key))
+        if isinstance(base, dict):
+            base.update(value)
+            stored_value = base
     if row is None:
-        row = models.AppSetting(key=target_key, value=value)
+        row = models.AppSetting(key=target_key, value=stored_value)
         db.add(row)
     else:
-        row.value = value
+        row.value = stored_value
     db.commit()
-    return value
+    return stored_value
+
 
