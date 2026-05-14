@@ -8,6 +8,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -23,22 +24,50 @@ router = APIRouter(prefix="/api/advice", tags=["advice"])
 def list_recent(
     limit: int = 200,
     source: str | None = None,
+    complete_batches: bool = False,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
 
     """列出最近建议。
 
-    - `source=batch` → 只返回批量分析的建议（AI 建议页用）
+    - `source=batch` → 只返回批量分析的建议
+    - `complete_batches=true` → limit 表示最近 N 个批次，并返回这些批次的完整记录。
+      这避免前端按“最近 N 条记录”截断时，新批次插入会让老批次少几条，表现为新批次影响老批次。
     - `source=single` → 只返回单独分析的建议
     - 不传 → 全部返回
     """
     q = db.query(models.Advice).join(models.Asset, models.Asset.id == models.Advice.asset_id)
     q = q.filter(models.Asset.user_id == current_user.id)
     if source:
-
         q = q.filter(models.Advice.source == source)
-    return q.order_by(models.Advice.created_at.desc()).limit(limit).all()
+
+    if complete_batches and source == "batch":
+        batch_rows = (
+            db.query(
+                models.Advice.batch_id.label("batch_id"),
+                func.max(models.Advice.created_at).label("last_at"),
+            )
+            .join(models.Asset, models.Asset.id == models.Advice.asset_id)
+            .filter(models.Asset.user_id == current_user.id)
+            .filter(models.Advice.source == "batch")
+            .filter(models.Advice.batch_id.isnot(None))
+            .filter(models.Advice.batch_id != "")
+            .group_by(models.Advice.batch_id)
+            .order_by(desc("last_at"))
+            .limit(max(1, min(limit, 100)))
+            .all()
+        )
+        batch_ids = [r.batch_id for r in batch_rows]
+        if not batch_ids:
+            return []
+        return (
+            q.filter(models.Advice.batch_id.in_(batch_ids))
+            .order_by(models.Advice.created_at.desc(), models.Advice.id.desc())
+            .all()
+        )
+
+    return q.order_by(models.Advice.created_at.desc(), models.Advice.id.desc()).limit(limit).all()
 
 
 @router.get("/asset/{asset_id}", response_model=List[schemas.AdviceOut])

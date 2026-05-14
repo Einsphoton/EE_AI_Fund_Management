@@ -71,8 +71,8 @@ export default function Advice() {
   const qc = useQueryClient();
   const task = useAnalysisTask();
   const advices = useQuery({
-    queryKey: ["advice", "recent", "batch"],
-    queryFn: () => AdviceApi.recent(300, "batch"),
+    queryKey: ["advice", "recent", "batch", "complete"],
+    queryFn: () => AdviceApi.recentBatches(20),
     staleTime: 2 * 60_000,
   });
   const assets = useQuery({

@@ -682,6 +682,9 @@ export const AdviceApi = {
   /** 列出最近建议。source 可选：batch（仅批量）/ single（仅单独）/ 不传（全部）。 */
   recent: (limit = 200, source?: "batch" | "single") =>
     api.get<Advice[]>("/advice", { params: { limit, ...(source ? { source } : {}) } }).then((r) => r.data),
+  /** 列出最近若干个完整批次，避免按行截断导致新批次影响旧批次显示。 */
+  recentBatches: (batchLimit = 20) =>
+    api.get<Advice[]>("/advice", { params: { limit: batchLimit, source: "batch", complete_batches: true } }).then((r) => r.data),
   byAsset: (id: number) => api.get<Advice[]>(`/advice/asset/${id}`).then((r) => r.data),
   runOne: (id: number) => api.post<Advice>(`/advice/run/${id}`).then((r) => r.data),
   runAll: () => api.post<{ analyzed: number }>("/advice/run-all").then((r) => r.data),
