@@ -8,10 +8,11 @@ import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import PriceChart from "../components/PriceChart";
 import FundamentalPanel from "../components/FundamentalPanel";
+import AssetFundamentalsPanel from "../components/AssetFundamentalsPanel";
 import TxnForm, { TxnFormData } from "../components/TxnForm";
 import DcaModal from "../components/DcaModal";
 import AnalysisCard from "../components/AnalysisCard";
-import { Assets as AssetApi, Quotes, AdviceApi, Transaction } from "../api/client";
+import { Assets as AssetApi, Quotes, AdviceApi, Asset, Holding, Transaction } from "../api/client";
 import {
   fmtMoney, fmtPct, fmtNum, dateOnly, actionColor, actionLabel,
 } from "../lib/format";
@@ -37,8 +38,31 @@ export default function AssetDetail() {
     { d: 3650, label: "10年" },
   ];
 
-  const holdings = useQuery({ queryKey: ["holdings"], queryFn: AssetApi.holdings });
-  const holding = holdings.data?.find((h) => h.asset.id === assetId);
+  const assetQuery = useQuery({
+    queryKey: ["asset", assetId],
+    queryFn: () => AssetApi.get(assetId),
+    enabled: !!assetId,
+    staleTime: 10 * 60_000,
+  });
+  const holdingQuery = useQuery({
+    queryKey: ["holding", assetId],
+    queryFn: () => AssetApi.holding(assetId),
+    enabled: !!assetId,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const h = query.state.data as Holding | undefined;
+      return h && h.total_shares > 0 && h.market_value == null ? 15_000 : false;
+    },
+  });
+  const holding = holdingQuery.data;
+
+  const txns = useQuery({
+    queryKey: ["transactions", assetId],
+    queryFn: () => AssetApi.txns(assetId),
+    enabled: !!assetId,
+    staleTime: 2 * 60_000,
+  });
 
   const quote = useQuery({
     queryKey: ["quote", assetId, days],
@@ -51,6 +75,13 @@ export default function AssetDetail() {
     queryFn: () => Quotes.snapshot(assetId),
     enabled: !!assetId,
     refetchInterval: 30_000,   // 30s 自动刷新基本盘
+  });
+
+  const fundamentals = useQuery({
+    queryKey: ["fundamentals", assetId],
+    queryFn: () => Quotes.fundamentals(assetId),
+    enabled: !!assetId,
+    staleTime: 10 * 60_000,
   });
 
   const advices = useQuery({
@@ -99,16 +130,29 @@ export default function AssetDetail() {
     onError: (e: any) => toast.error(e.message),
   });
 
-  if (!holding) {
+  if (!assetQuery.data && !holding) {
     return (
       <div className="text-center text-muted py-20">
-        加载中…  <Link to="/assets" className="text-accent-soft">返回</Link>
+        正在加载资产基础信息… <Link to="/assets" className="text-accent-soft">返回</Link>
       </div>
     );
   }
 
-  const a = holding.asset;
+  const a: Asset = holding?.asset || assetQuery.data!;
+  const safeHolding: Holding = holding || {
+    asset: a,
+    total_shares: 0,
+    total_cost: 0,
+    avg_cost: 0,
+    total_fee: 0,
+    realized_pnl: 0,
+    current_price: quote.data?.current_price ?? null,
+    market_value: null,
+    profit: null,
+    profit_pct: null,
+  };
   const latestAdvice = advices.data?.[0];
+  const transactions = txns.data || quote.data?.transactions || [];
 
   return (
     <>
@@ -144,36 +188,48 @@ export default function AssetDetail() {
         }
       />
 
+      {holdingQuery.isFetching && (
+        <div className="card p-3 mb-4 text-xs text-muted">
+          资产详情已先显示，正在后台补充持仓、市值和盈亏…
+        </div>
+      )}
+
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-5">
-        <StatCard label="持仓" value={holding.total_shares > 0 ? fmtNum(holding.total_shares) : "未持有"} />
+        <StatCard label="持仓" value={safeHolding.total_shares > 0 ? fmtNum(safeHolding.total_shares) : (holdingQuery.isLoading ? "加载中…" : "未持有")} />
         <StatCard
           label="平均成本"
-          value={holding.avg_cost ? fmtNum(holding.avg_cost, 4) : "—"}
-          hint={holding.total_cost ? `本金 ${fmtMoney(holding.total_cost)}` : undefined}
+          value={safeHolding.avg_cost ? fmtNum(safeHolding.avg_cost, 4) : "—"}
+          hint={safeHolding.total_cost ? `本金 ${fmtMoney(safeHolding.total_cost)}` : undefined}
         />
         <StatCard
           label="当前价"
-          value={holding.current_price ? fmtNum(holding.current_price, 4) : "—"}
+          value={safeHolding.current_price ? fmtNum(safeHolding.current_price, 4) : "—"}
           tone="accent"
-          hint={holding.market_value ? `市值 ${fmtMoney(holding.market_value)}` : undefined}
+          hint={safeHolding.market_value ? `市值 ${fmtMoney(safeHolding.market_value)}` : undefined}
         />
         <StatCard
           label="浮动盈亏"
-          value={holding.profit !== null ? fmtMoney(holding.profit) : "—"}
-          tone={(holding.profit ?? 0) >= 0 ? "success" : "danger"}
-          delta={<span>{fmtPct(holding.profit_pct)}</span>}
+          value={safeHolding.profit !== null ? fmtMoney(safeHolding.profit) : "—"}
+          tone={(safeHolding.profit ?? 0) >= 0 ? "success" : "danger"}
+          delta={<span>{fmtPct(safeHolding.profit_pct)}</span>}
         />
         <StatCard
           label="累计费用"
-          value={holding.total_fee ? fmtMoney(holding.total_fee) : "0"}
+          value={safeHolding.total_fee ? fmtMoney(safeHolding.total_fee) : "0"}
           tone="default"
           hint={
-            holding.realized_pnl
-              ? `已实现 ${holding.realized_pnl >= 0 ? "+" : ""}${fmtMoney(holding.realized_pnl)}`
+            safeHolding.realized_pnl
+              ? `已实现 ${safeHolding.realized_pnl >= 0 ? "+" : ""}${fmtMoney(safeHolding.realized_pnl)}`
               : "—"
           }
         />
       </div>
+
+      {(quote.isFetching || snapshot.isFetching || fundamentals.isFetching || advices.isFetching) && (
+        <div className="card p-3 mb-4 text-xs text-muted">
+          图表、基本盘和 AI 分析正在逐项加载；已拿到的数据会先显示。
+        </div>
+      )}
 
       <div className={`grid gap-6 mb-6 ${a.asset_type === "fund" ? "" : "lg:grid-cols-3"}`}>
         <div className={`card p-5 ${a.asset_type === "fund" ? "" : "lg:col-span-2"}`}>
@@ -213,6 +269,10 @@ export default function AssetDetail() {
         )}
       </div>
 
+      <div className="mb-6">
+        <AssetFundamentalsPanel data={fundamentals.data} loading={fundamentals.isLoading} />
+      </div>
+
       <div className="grid lg:grid-cols-2 gap-6">
         <div className="card p-5">
           <div className="flex items-center justify-between mb-3">
@@ -225,10 +285,11 @@ export default function AssetDetail() {
             </button>
           </div>
           <div className="space-y-2">
-            {(quote.data?.transactions || []).length === 0 && (
+            {txns.isLoading && <div className="text-center text-muted py-4 text-sm">正在加载交易记录…</div>}
+            {!txns.isLoading && transactions.length === 0 && (
               <div className="text-center text-muted py-8 text-sm">尚无交易，点击右上方「记录交易」添加</div>
             )}
-            {(quote.data?.transactions || []).map((t) => (
+            {transactions.map((t) => (
               <div key={t.id} className="flex items-center justify-between rounded-xl border border-line p-3 hover:border-accent/40 transition">
                 <div className="min-w-0 flex-1">
                   <div className="text-sm font-medium">
@@ -272,7 +333,7 @@ export default function AssetDetail() {
             <BrainCircuit className="w-4 h-4 text-accent" /> AI 投资建议
           </h3>
           {latestAdvice ? (
-            <AnalysisCard advice={latestAdvice} holding={holding} />
+            <AnalysisCard advice={latestAdvice} holding={safeHolding} />
           ) : (
             <div className="text-center text-muted py-6 text-sm">尚未生成建议，点击右上方按钮触发分析</div>
           )}

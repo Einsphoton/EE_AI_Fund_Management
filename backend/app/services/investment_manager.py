@@ -30,9 +30,10 @@ SYSTEM_PROMPT = """
 6. watch_only=true 表示“我的标的/观察池”，尚未实质持有；可以买入建仓，但不能卖出。
 7. 可以建议 buy / sell / hold，但只返回需要用户确认的 buy 或 sell 动作；hold 不要进入 actions。
 8. 如果 pending_todos 里已有某个 asset_id 的未处理建议，除非出现非常紧急的极端行情（暴跌低估需要抢筹，或重大风险需要抛售），不要重复推送该资产；确实紧急时必须返回 urgent=true。
-9. 数量必须可执行：给出 asset_id、action、shares、price、amount、platform、currency、reason。
-10. 对 buy：amount 不能超过对应平台币种和资产类型预算的 remaining_budget；shares≈amount/price。
-11. 对 sell：shares 不能超过当前持仓份额，且不能选择 watch_only=true 的标的。
+9. 每个资产会带 latest_asset_analysis（来自“AI分析我的资产”的最新结论）。你必须优先参考它：高置信 buy/sell 应该进入候选动作或在 reason 中解释为什么暂不执行；不要与高置信资产分析结论无理由相反。
+10. 数量必须可执行：给出 asset_id、action、shares、price、amount、platform、currency、reason。
+11. 对 buy：amount 不能超过对应平台币种和资产类型预算的 remaining_budget；shares≈amount/price。
+12. 对 sell：shares 不能超过当前持仓份额，且不能选择 watch_only=true 的标的。
 
 严格输出纯 JSON，不要 Markdown，不要代码块：
 {
@@ -180,6 +181,22 @@ async def _portfolio_rows(db: Session, user_id: int | None = None) -> list[dict[
     rows: list[dict[str, Any]] = []
     for a, price in zip(assets, prices):
         h = holding_service.summarize(a, price)
+        latest_advice = (
+            db.query(models.Advice)
+            .filter(models.Advice.asset_id == a.id)
+            .order_by(models.Advice.created_at.desc())
+            .first()
+        )
+        latest_analysis = None
+        if latest_advice is not None:
+            latest_analysis = {
+                "advice_id": latest_advice.id,
+                "source": latest_advice.source,
+                "action": latest_advice.action,
+                "confidence": latest_advice.confidence,
+                "summary": latest_advice.summary,
+                "created_at": latest_advice.created_at.isoformat() if latest_advice.created_at else None,
+            }
         rows.append({
             "asset_id": a.id,
             "name": a.name,
@@ -194,12 +211,77 @@ async def _portfolio_rows(db: Session, user_id: int | None = None) -> list[dict[
             "current_price": h.get("current_price") or price,
             "market_value": h.get("market_value"),
             "profit_pct": h.get("profit_pct"),
+            "latest_asset_analysis": latest_analysis,
         })
     return rows
 
 
-def _fallback_actions(rows: list[dict[str, Any]], budget_status: list[dict[str, Any]]) -> dict[str, Any]:
+def _high_confidence_analysis_actions(rows: list[dict[str, Any]], budget_status: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把 AI 资产分析里的高置信 buy/sell 转成投资经理候选动作，保证两套 AI 联动。"""
     actions: list[dict[str, Any]] = []
+    for r in rows:
+        latest = r.get("latest_asset_analysis") or {}
+        action = str(latest.get("action") or "").lower()
+        confidence = float(latest.get("confidence") or 0)
+        price = float(r.get("current_price") or 0)
+        if action not in {"buy", "sell"} or confidence < 0.65 or price <= 0:
+            continue
+        if action == "sell":
+            held_shares = float(r.get("shares") or 0)
+            if r.get("watch_only") or held_shares <= 0 or confidence < 0.7:
+                continue
+            shares = round(held_shares * (0.5 if confidence < 0.85 else 0.8), 4)
+            if shares > 0:
+                actions.append({
+                    "asset_id": r["asset_id"],
+                    "action": "sell",
+                    "platform": r.get("platform") or "",
+                    "currency": r.get("currency") or "CNY",
+                    "asset_type": r.get("asset_type"),
+                    "amount": round(shares * price, 2),
+                    "shares": shares,
+                    "price": price,
+                    "confidence": confidence,
+                    "urgent": confidence >= 0.8,
+                    "reason": "联动资产分析：最新 AI 资产分析给出高置信卖出/减仓，生成待确认减仓动作。",
+                })
+            continue
+
+        matched_budget = next(
+            (
+                b for b in budget_status
+                if b.get("platform") == r.get("platform")
+                and b.get("currency") == r.get("currency")
+                and r.get("asset_type") in (b.get("asset_types") or [])
+            ),
+            None,
+        )
+        remaining = float((matched_budget or {}).get("remaining_budget") or 0)
+        if remaining <= 0:
+            continue
+        amount = round(min(remaining * (0.6 if confidence >= 0.8 else 0.4), remaining), 2)
+        shares = round(amount / price, 4)
+        if shares > 0:
+            actions.append({
+                "asset_id": r["asset_id"],
+                "action": "buy",
+                "platform": r.get("platform") or "",
+                "currency": r.get("currency") or "CNY",
+                "asset_type": r.get("asset_type"),
+                "amount": amount,
+                "shares": shares,
+                "price": price,
+                "confidence": confidence,
+                "urgent": confidence >= 0.8,
+                "reason": "联动资产分析：最新 AI 资产分析给出高置信买入，按预算节奏生成待确认动作。",
+            })
+    return actions[:8]
+
+
+def _fallback_actions(rows: list[dict[str, Any]], budget_status: list[dict[str, Any]]) -> dict[str, Any]:
+    actions: list[dict[str, Any]] = _high_confidence_analysis_actions(rows, budget_status)
+    seen = {(a.get("asset_id"), a.get("action")) for a in actions}
+
     for b in budget_status:
         remaining = float(b.get("remaining_budget") or 0)
         if remaining <= 0:
@@ -212,14 +294,23 @@ def _fallback_actions(rows: list[dict[str, Any]], budget_status: list[dict[str, 
             and r.get("asset_type") in allowed_types
             and (r.get("current_price") or 0) > 0
         ]
-        candidates.sort(key=lambda r: (r.get("profit_pct") is None, r.get("profit_pct") or 0))
+        candidates.sort(key=lambda r: (
+            (r.get("latest_asset_analysis") or {}).get("action") != "buy",
+            -float((r.get("latest_asset_analysis") or {}).get("confidence") or 0),
+            r.get("profit_pct") is None,
+            r.get("profit_pct") or 0,
+        ))
         if not candidates:
             continue
         target = candidates[0]
-        amount = round(min(remaining * 0.35, remaining), 2)
+        latest = target.get("latest_asset_analysis") or {}
+        linked_buy = latest.get("action") == "buy" and float(latest.get("confidence") or 0) >= 0.6
+        amount = round(min(remaining * (0.5 if linked_buy else 0.35), remaining), 2)
         price = float(target.get("current_price") or 0)
         shares = round(amount / price, 4) if price > 0 else 0.0
-        if shares > 0:
+        if shares > 0 and (target["asset_id"], "buy") not in seen:
+            confidence = float(latest.get("confidence") or 0.45) if linked_buy else 0.45
+            seen.add((target["asset_id"], "buy"))
             actions.append({
                 "asset_id": target["asset_id"],
                 "action": "buy",
@@ -229,10 +320,12 @@ def _fallback_actions(rows: list[dict[str, Any]], budget_status: list[dict[str, 
                 "amount": amount,
                 "shares": shares,
                 "price": price,
-                "confidence": 0.45,
-                "reason": "AI 不可用时的保守兜底：仅使用约三成本月剩余额度，优先补低位持仓。",
+                "confidence": confidence,
+                "urgent": linked_buy and confidence >= 0.8,
+                "reason": "联动资产分析：最新 AI 资产分析支持买入，按预算节奏生成待确认动作。" if linked_buy else "AI 不可用时的保守兜底：使用约三成本月剩余额度，优先补低位持仓。",
             })
-    return {"summary": "AI 暂不可用，已按保守规则生成少量待确认动作。", "actions": actions[:5]}
+    return {"summary": "AI 暂不可用，已按资产分析联动与保守规则生成少量待确认动作。", "actions": actions[:5]}
+
 
 
 def get_budget_status(db: Session, user_id: int | None = None) -> list[dict[str, Any]]:
@@ -320,7 +413,7 @@ async def run_investment_manager(db: Session, user_id: int | None = None) -> dic
             "monthly_budget_status": budget_status,
             "assets": rows,
             "pending_todos": pending_todo_context,
-            "instruction": "请根据预算和资产现状生成本次需要进入 To-do 的 buy/sell 动作。暂不推荐新标的；pending_todos 中已有未处理建议的资产不要重复推送，除非 urgent=true。",
+            "instruction": "请根据预算、资产现状和 latest_asset_analysis 生成本次需要进入 To-do 的 buy/sell 动作。暂不推荐新标的；pending_todos 中已有未处理建议的资产不要重复推送，除非 urgent=true。高置信资产分析给出的买入/卖出建议需要被优先纳入或说明暂缓原因。",
         }
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -368,6 +461,17 @@ async def run_investment_manager(db: Session, user_id: int | None = None) -> dic
     actions = result.get("actions") if isinstance(result, dict) else []
     if not isinstance(actions, list):
         actions = []
+    linked_actions = _high_confidence_analysis_actions(rows, budget_status)
+    seen_actions = {
+        (int(a.get("asset_id")), str(a.get("action") or "").lower())
+        for a in actions
+        if isinstance(a, dict) and a.get("asset_id") is not None
+    }
+    for linked in linked_actions:
+        key = (int(linked.get("asset_id")), str(linked.get("action") or "").lower())
+        if key not in seen_actions:
+            actions.append(linked)
+            seen_actions.add(key)
 
     asset_by_id = {r["asset_id"]: r for r in rows}
     created: list[models.TodoItem] = []
@@ -439,6 +543,7 @@ async def run_investment_manager(db: Session, user_id: int | None = None) -> dic
                 "allowed_asset_types": matched_budget.get("asset_types") if action == "buy" and matched_budget else [],
                 "urgent": urgent,
                 "confidence": confidence,
+                "linked_asset_analysis": row.get("latest_asset_analysis"),
                 "transaction": {
                     "txn_type": action,
                     "shares": round(shares, 4),

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Plus, Pencil, Trash2, Eye, Wallet, LineChart, Sparkles } from "lucide-react";
+import { Plus, Pencil, Trash2, Eye, Wallet, Sparkles } from "lucide-react";
 import toast from "react-hot-toast";
 
 import PageHeader from "../components/PageHeader";
@@ -23,10 +23,40 @@ interface HoldingTotals {
 
 export default function Assets() {
   const qc = useQueryClient();
-  const { data: holdingsRaw = [] } = useQuery({
-    queryKey: ["holdings"], queryFn: AssetApi.holdings,
+  const assetsQuery = useQuery({
+    queryKey: ["assets"],
+    queryFn: AssetApi.list,
+    staleTime: 10 * 60_000,
+    refetchOnWindowFocus: false,
   });
-  const holdings = holdingsRaw.filter((h) => !h.asset.watch_only);
+  const assets = assetsQuery.data || [];
+  const visibleAssets = assets.filter((a) => !a.watch_only);
+  const holdingQueries = useQueries({
+    queries: visibleAssets.map((asset) => ({
+      queryKey: ["holding", asset.id],
+      queryFn: () => AssetApi.holding(asset.id),
+      staleTime: 60_000,
+      refetchOnWindowFocus: false,
+      refetchInterval: (query: any) => {
+        const h = query.state.data as Holding | undefined;
+        return h && h.total_shares > 0 && h.market_value == null ? 15_000 : false;
+      },
+    })),
+  });
+  const placeholderHolding = (asset: Asset): Holding => ({
+    asset,
+    total_shares: 0,
+    total_cost: 0,
+    avg_cost: 0,
+    total_fee: 0,
+    realized_pnl: 0,
+    current_price: null,
+    market_value: null,
+    profit: null,
+    profit_pct: null,
+  });
+  const holdings = visibleAssets.map((asset, idx) => (holdingQueries[idx]?.data as Holding | undefined) || placeholderHolding(asset));
+  const marketLoading = holdingQueries.some((q) => q.isFetching);
 
   const [groupMode, setGroupMode] = useState<GroupMode>("asset_type");
   const [open, setOpen] = useState(false);
@@ -202,7 +232,14 @@ export default function Assets() {
         }
       />
 
-      {groups.length === 0 && (
+      {(assetsQuery.isLoading || marketLoading) && (
+        <div className="card p-3 mb-4 text-xs text-muted flex items-center justify-between gap-3">
+          <span>{assetsQuery.isLoading ? "正在加载资产清单…" : "资产已先显示，正在后台补充行情、市值和盈亏…"}</span>
+          <span className="text-accent-soft">已显示 {holdings.length} 个资产</span>
+        </div>
+      )}
+
+      {groups.length === 0 && !assetsQuery.isLoading && (
         <div className="card p-10 text-center text-muted">
           还没有任何持有资产，点右上角「添加资产」开始；观察池请到「我的标的」。
         </div>
@@ -215,6 +252,7 @@ export default function Assets() {
             icon={<Wallet className="w-4 h-4 text-accent" />}
             list={g.list}
             totals={totalsOf(g.list)}
+            marketLoading={marketLoading}
             onEdit={openEdit}
             onAnalyze={(a) => setAnalyzingId(a.id)}
             onDelete={(a) => {
@@ -252,13 +290,14 @@ interface SectionProps {
   icon: React.ReactNode;
   list: Holding[];
   totals: HoldingTotals;
+  marketLoading: boolean;
   onEdit: (a: Asset) => void;
   onAnalyze: (a: Asset) => void;
   onDelete: (a: Asset) => void;
   emptyText: string;
 }
 
-function Section({ title, icon, list, totals, onEdit, onAnalyze, onDelete, emptyText }: SectionProps) {
+function Section({ title, icon, list, totals, marketLoading, onEdit, onAnalyze, onDelete, emptyText }: SectionProps) {
   return (
     <div className="card overflow-hidden">
       <div className="flex items-center justify-between px-5 py-3 border-b border-line/60 bg-bg-soft/30">
@@ -330,9 +369,9 @@ function Section({ title, icon, list, totals, onEdit, onAnalyze, onDelete, empty
                 {h.total_shares > 0 ? h.total_shares.toLocaleString(undefined, { maximumFractionDigits: 4 }) : "—"}
               </td>
               <td className="text-right px-4 py-3 font-mono tabular-nums">{fmtMoney(h.total_cost)}</td>
-              <td className="text-right px-4 py-3 font-mono tabular-nums">{fmtMoney(h.market_value)}</td>
+              <td className="text-right px-4 py-3 font-mono tabular-nums">{h.market_value == null && marketLoading ? <span className="text-muted">加载中…</span> : fmtMoney(h.market_value)}</td>
               <td className={`text-right px-4 py-3 font-mono tabular-nums ${(h.profit ?? 0) >= 0 ? "text-emerald2" : "text-rose2"}`}>
-                {fmtMoney(h.profit)}
+                {h.profit == null && marketLoading ? <span className="text-muted">加载中…</span> : fmtMoney(h.profit)}
                 <div className="text-[11px]">{fmtPct(h.profit_pct)}</div>
               </td>
               <td className={`text-right px-4 py-3 font-mono tabular-nums ${(h.realized_pnl ?? 0) >= 0 ? "text-emerald2" : "text-rose2"}`}>

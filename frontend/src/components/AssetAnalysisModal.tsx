@@ -8,7 +8,7 @@ import { Link } from "react-router-dom";
 
 import PriceChart from "./PriceChart";
 import AnalysisCard from "./AnalysisCard";
-import { Asset, Advice, Assets, AdviceApi, Quotes } from "../api/client";
+import { Asset, Advice, Assets, AdviceApi, Holding, Quotes } from "../api/client";
 import {
   fmtMoney, fmtPct, fmtNum, actionColor, actionLabel, fmtDateTime,
 } from "../lib/format";
@@ -29,8 +29,18 @@ export default function AssetAnalysisModal({ assetId, onClose }: Props) {
   const qc = useQueryClient();
   const [days, setDays] = useState(180);
 
-  const holdings = useQuery({ queryKey: ["holdings"], queryFn: Assets.holdings });
-  const holding = holdings.data?.find((h) => h.asset.id === assetId);
+  const holdingQuery = useQuery({
+    queryKey: ["holding", assetId],
+    queryFn: () => Assets.holding(assetId),
+    enabled: !!assetId,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const h = query.state.data as Holding | undefined;
+      return h && h.total_shares > 0 && h.market_value == null ? 15_000 : false;
+    },
+  });
+  const holding = holdingQuery.data;
 
   const quote = useQuery({
     queryKey: ["quote", assetId, days],

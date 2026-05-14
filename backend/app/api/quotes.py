@@ -92,6 +92,39 @@ async def asset_snapshot(
         }
 
 
+@router.get("/asset/{asset_id}/fundamentals")
+async def asset_fundamentals(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """详情页基础数据：近一年区间、分红记录等，基金/股票/ETF 均可用。"""
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+    if not asset:
+        raise HTTPException(404, "asset not found")
+    quote_sources = settings_service.get(db, "quote_sources", user_id=current_user.id) or {}
+    try:
+        data = await quotes_service.fetch_fundamentals(
+            asset.asset_type.value,
+            asset.market.value,
+            asset.code,
+            quote_sources=quote_sources,
+        )
+        return {
+            **data,
+            "name": asset.name,
+            "platform": asset.platform,
+        }
+    except Exception as e:
+        return {
+            "asset_type": asset.asset_type.value,
+            "market": asset.market.value,
+            "code": asset.code,
+            "name": asset.name,
+            "stats": {},
+            "dividends": {"items": [], "error": f"fundamentals fetch failed: {type(e).__name__}: {str(e)[:200]}"},
+        }
+
 
 @router.get("/raw")
 async def raw_quote(

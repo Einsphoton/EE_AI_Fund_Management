@@ -18,7 +18,8 @@ import asyncio
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from html import unescape
 from typing import Any
 
 import httpx
@@ -583,9 +584,11 @@ async def fetch_current_price(
 
 
 
-# ---------------- 轻量内存缓存（默认 30s） ----------------
+# ---------------- 轻量内存缓存 ----------------
 _PRICE_CACHE: dict[tuple[str, str, str, str], tuple[float, float | None]] = {}
-_PRICE_TTL = 30.0  # 秒
+_PRICE_TTL = 900.0       # 成功价格缓存 15 分钟，页面切换不重复等外部行情源
+_PRICE_NONE_TTL = 15.0   # 空价格只短暂缓存，避免一次超时导致长期无行情
+_CURRENT_PRICE_TIMEOUT = 12.0  # 单资产当前价硬超时；并发汇总时总等待约为这个上限
 
 
 def _quote_source_cache_key(quote_sources: dict[str, Any] | None) -> str:
@@ -602,9 +605,320 @@ async def fetch_current_price_cached(
     key = (asset_type, market, code, _quote_source_cache_key(quote_sources))
     now = time.time()
     hit = _PRICE_CACHE.get(key)
-    if hit and (now - hit[0]) < _PRICE_TTL:
-        return hit[1]
-    v = await fetch_current_price(asset_type, market, code, quote_sources=quote_sources)
-    _PRICE_CACHE[key] = (now, v)
-    return v
+    if hit:
+        age = now - hit[0]
+        value = hit[1]
+        ttl = _PRICE_TTL if value is not None else _PRICE_NONE_TTL
+        if age < ttl:
+            return value
+    try:
+        v = await asyncio.wait_for(
+            fetch_current_price(asset_type, market, code, quote_sources=quote_sources),
+            timeout=_CURRENT_PRICE_TIMEOUT,
+        )
+    except Exception:
+        if hit and hit[1] is not None:
+            return hit[1]
+        v = None
+    if v is not None or hit is None or hit[1] is None:
+        _PRICE_CACHE[key] = (now, v)
+    return v if v is not None else (hit[1] if hit else None)
+
+
+# ---------------- 基础数据 / 分红 ----------------
+def _safe_float_from_text(v: Any) -> float | None:
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v or "").strip()
+    if not s or s in {"-", "--"}:
+        return None
+    m = re.search(r"-?\d+(?:\.\d+)?", s.replace(",", ""))
+    return _to_float(m.group(0)) if m else None
+
+
+def _extract_cash_dividend(v: Any) -> float | None:
+    """提取每份分红；基金网页常写“每10份派0.50元”，需换算为每份 0.05。"""
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = _clean_html_cell(str(v or ""))
+    if not s:
+        return None
+    m = re.search(r"每\s*(?:10|十)\s*份[^\d-]*(-?\d+(?:\.\d+)?)\s*元?", s)
+    if m:
+        value = _to_float(m.group(1))
+        return round(value / 10, 8) if value is not None else None
+    m = re.search(r"每\s*份[^\d-]*(-?\d+(?:\.\d+)?)\s*元?", s)
+    if m:
+        return _to_float(m.group(1))
+    m = re.search(r"派(?:现|发)?[^\d-]*(-?\d+(?:\.\d+)?)\s*元", s)
+    if m:
+        return _to_float(m.group(1))
+    return _safe_float_from_text(s)
+
+
+def _dividend_empty(source: str, symbol: str | None = None) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source": source,
+        "items": [],
+        "total_count": 0,
+        "total_cash_dividend": 0.0,
+        "last_date": None,
+        "error": "暂无公开分红记录或数据源暂不可用",
+    }
+    if symbol:
+        out["symbol"] = symbol
+    return out
+
+
+def _parse_json_or_jsonp(text: str) -> dict[str, Any] | None:
+    """兼容 JSON / JSONP / var apidata={...}；解析失败返回 None，不把技术错误暴露给前端。"""
+    s = (text or "").strip().lstrip("\ufeff")
+    if not s:
+        return None
+    for cand in (s, re.sub(r"^[\w$\.]+\((.*)\);?$", r"\1", s, flags=re.S)):
+        try:
+            obj = json.loads(cand)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+    m = re.search(r"\{.*\}", s, flags=re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _clean_html_cell(s: str) -> str:
+    s = unescape(s or "")
+    s = re.sub(r"<br\s*/?>", " ", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _parse_date_text(v: Any) -> str:
+    s = str(v or "")
+    m = re.search(r"\d{4}-\d{1,2}-\d{1,2}", s)
+    if not m:
+        return ""
+    try:
+        return datetime.fromisoformat(m.group(0)).date().isoformat()
+    except Exception:
+        return m.group(0)
+
+
+def _normalize_dividend_items(raw_items: list[Any], limit: int) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for it in raw_items:
+        if not isinstance(it, dict):
+            continue
+        text = " ".join(str(v or "") for v in it.values())
+        cash = _safe_float_from_text(
+            it.get("MGFH") or it.get("FHFCZ") or it.get("FHSP") or it.get("BONUS") or
+            it.get("fhr") or it.get("cash_dividend") or text
+        )
+        date = _parse_date_text(it.get("FSRQ") or it.get("DJR") or it.get("CQCXR") or it.get("date") or text)
+        if not date and cash is None:
+            continue
+        items.append({
+            "date": date,
+            "cash_dividend": cash,
+            "nav": _safe_float_from_text(it.get("DWJZ") or it.get("JZ") or it.get("nav")),
+            "record_date": _parse_date_text(it.get("DJR") or it.get("record_date")),
+            "ex_dividend_date": _parse_date_text(it.get("CQCXR") or it.get("ex_dividend_date")),
+            "raw": it,
+        })
+    items.sort(key=lambda x: x.get("date") or "", reverse=True)
+    return items[:limit]
+
+
+def _parse_fund_archive_html(content: str, limit: int) -> list[dict[str, Any]]:
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", content or "", flags=re.S | re.I)
+    raw_items: list[dict[str, Any]] = []
+    for row in rows:
+        cells = [_clean_html_cell(x) for x in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, flags=re.S | re.I)]
+        if not cells or not any(re.search(r"\d{4}-\d{1,2}-\d{1,2}", c) for c in cells):
+            continue
+        joined = " ".join(cells)
+        without_dates = re.sub(r"\d{4}-\d{1,2}-\d{1,2}", " ", joined)
+        raw_items.append({
+            "date": _parse_date_text(joined),
+            "cash_dividend": _extract_cash_dividend(without_dates),
+            "raw_text": joined,
+        })
+    return _normalize_dividend_items(raw_items, limit)
+
+
+async def fetch_fund_dividends(code: str, limit: int = 50) -> dict[str, Any]:
+    """Best-effort 获取场外基金分红记录（天天基金 F10 + 档案页兜底）。"""
+    headers = {**HEADERS, "Referer": f"https://fundf10.eastmoney.com/fhsp_{code}.html"}
+    limit = max(1, min(limit, 80))
+    raw_items: list[Any] = []
+    source = "eastmoney_f10"
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+        try:
+            r = await client.get(
+                "https://api.fund.eastmoney.com/f10/fhsp",
+                params={"fundCode": code, "pageIndex": 1, "pageSize": limit},
+            )
+            data = _parse_json_or_jsonp(r.text)
+            raw_data = (data or {}).get("Data") or (data or {}).get("data") or {}
+            if isinstance(raw_data, dict):
+                for key in ("FHSPList", "fhspList", "list", "items"):
+                    if isinstance(raw_data.get(key), list):
+                        raw_items = raw_data.get(key) or []
+                        break
+            elif isinstance(raw_data, list):
+                raw_items = raw_data
+        except Exception:
+            raw_items = []
+
+        items = _normalize_dividend_items(raw_items, limit)
+        if not items:
+            source = "eastmoney_archive"
+            try:
+                r = await client.get(
+                    "https://fundf10.eastmoney.com/FundArchivesDatas.aspx",
+                    params={"type": "jjfh", "code": code, "rt": int(time.time() * 1000)},
+                )
+                text = r.text or ""
+                archive_obj = _parse_json_or_jsonp(text) or {}
+                content = archive_obj.get("content") if isinstance(archive_obj, dict) else None
+                if not content:
+                    m = re.search(r"content\s*:\s*(['\"])(.*?)\1\s*,\s*records", text, flags=re.S)
+                    if m:
+                        raw_content = m.group(2)
+                        try:
+                            content = json.loads(f"\"{raw_content}\"")
+                        except Exception:
+                            content = raw_content
+                    else:
+                        content = text
+                items = _parse_fund_archive_html(str(content or ""), limit)
+            except Exception:
+                items = []
+
+    total = sum(float(x.get("cash_dividend") or 0) for x in items)
+    return {
+        "source": source,
+        "items": items,
+        "total_count": len(items),
+        "total_cash_dividend": round(total, 6),
+        "last_date": items[0].get("date") if items else None,
+        "error": None if items else "暂无结构化分红数据",
+    }
+
+
+
+def _yahoo_symbol(market: str, code: str) -> str | None:
+    market = (market or "").upper()
+    raw = (code or "").strip().lower()
+    if not raw:
+        return None
+    if market == "US":
+        return raw.upper().removeprefix("US")
+    if market == "HK":
+        return raw.removeprefix("hk").zfill(4) + ".HK"
+    if market == "A":
+        symbol = _normalize_cn_symbol(raw)
+        if symbol.startswith("sh"):
+            return symbol[2:] + ".SS"
+        if symbol.startswith(("sz", "bj")):
+            return symbol[2:] + ".SZ"
+    return None
+
+
+async def fetch_yahoo_dividends(market: str, code: str, limit: int = 20) -> dict[str, Any]:
+    """Best-effort 获取股票/ETF 分红记录（Yahoo chart events）。"""
+    symbol = _yahoo_symbol(market, code)
+    if not symbol:
+        return _dividend_empty("yahoo")
+    period2 = int(time.time())
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=HEADERS, follow_redirects=True) as client:
+            r = await client.get(url, params={"period1": 0, "period2": period2, "interval": "1mo", "events": "div"})
+        data = _parse_json_or_jsonp(r.text) or {}
+        result = ((data.get("chart") or {}).get("result") or [None])[0] or {}
+        divs = ((result.get("events") or {}).get("dividends") or {})
+    except Exception:
+        return _dividend_empty("yahoo", symbol)
+
+    items: list[dict[str, Any]] = []
+    for d in divs.values():
+        if not isinstance(d, dict):
+            continue
+        ts = int(d.get("date") or 0)
+        amount = _safe_float_from_text(d.get("amount"))
+        items.append({
+            "date": datetime.fromtimestamp(ts).date().isoformat() if ts else "",
+            "cash_dividend": amount,
+            "raw": d,
+        })
+    items.sort(key=lambda x: x.get("date") or "", reverse=True)
+    if not items:
+        return _dividend_empty("yahoo", symbol)
+    total = sum(float(x.get("cash_dividend") or 0) for x in items)
+    return {
+        "source": "yahoo",
+        "symbol": symbol,
+        "items": items[:limit],
+        "total_count": len(items),
+        "total_cash_dividend": round(total, 6),
+        "last_date": items[0].get("date") if items else None,
+        "error": None,
+    }
+
+
+async def fetch_fundamentals(
+    asset_type: str,
+    market: str,
+    code: str,
+    quote_sources: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """返回详情页使用的基础数据：近一年价格区间、分红、基础统计。"""
+    asset_type = (asset_type or "").lower()
+    market = (market or "").upper()
+    quote = await fetch_quote(asset_type, market, code, days=370, quote_sources=quote_sources)
+    points = quote.get("points") or []
+    closes = [float(p.get("close")) for p in points if _to_float(p.get("close")) is not None]
+    last = _to_float(quote.get("current_price")) or (closes[-1] if closes else None)
+    stats = {
+        "latest_price": last,
+        "latest_date": points[-1].get("date") if points else None,
+        "high_52w": max(closes) if closes else None,
+        "low_52w": min(closes) if closes else None,
+        "history_count": len(points),
+        "source": quote.get("source"),
+    }
+    if asset_type == "fund" and market == "OTC":
+        dividends = await fetch_fund_dividends(code)
+    elif asset_type in {"stock", "etf"}:
+        dividends = await fetch_yahoo_dividends(market, code)
+    else:
+        dividends = {"source": "none", "items": [], "total_count": 0, "total_cash_dividend": 0.0}
+
+    cutoff = (datetime.now() - timedelta(days=365)).date()
+    trailing_12m = 0.0
+    for item in dividends.get("items") or []:
+        try:
+            d = datetime.fromisoformat(str(item.get("date") or "")).date()
+        except Exception:
+            continue
+        if d >= cutoff:
+            trailing_12m += float(item.get("cash_dividend") or 0)
+    dividends["trailing_12m_cash_dividend"] = round(trailing_12m, 6)
+    dividends["dividend_yield_pct"] = round(trailing_12m / last * 100, 4) if last and last > 0 and trailing_12m > 0 else None
+
+    return {
+        "asset_type": asset_type,
+        "market": market,
+        "code": code,
+        "stats": stats,
+        "dividends": dividends,
+    }
+
 

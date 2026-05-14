@@ -169,6 +169,43 @@ export interface Snapshot {
   market?: string;
 }
 
+export interface DividendItem {
+  date?: string | null;
+  cash_dividend?: number | null;
+  nav?: number | null;
+  record_date?: string | null;
+  ex_dividend_date?: string | null;
+  raw?: Record<string, any>;
+}
+
+export interface AssetFundamentals {
+  asset_type: AssetType | string;
+  market: Market | string;
+  code: string;
+  name?: string;
+  platform?: string;
+  stats?: {
+    latest_price?: number | null;
+    latest_date?: string | null;
+    high_52w?: number | null;
+    low_52w?: number | null;
+    history_count?: number;
+    source?: string;
+  };
+  dividends?: {
+    source?: string;
+    symbol?: string;
+    items?: DividendItem[];
+    total_count?: number;
+    total_cash_dividend?: number | null;
+    trailing_12m_cash_dividend?: number | null;
+    dividend_yield_pct?: number | null;
+    last_date?: string | null;
+    error?: string;
+  };
+}
+
+
 export interface Skill {
   id: number;
   skill_id: string;
@@ -463,6 +500,8 @@ export const AuthApi = {
 export const Assets = {
 
   list: () => api.get<Asset[]>("/assets").then((r) => r.data),
+  get: (id: number) => api.get<Asset>(`/assets/${id}`).then((r) => r.data),
+  holding: (id: number) => api.get<Holding>(`/assets/${id}/summary`).then((r) => r.data),
   create: (p: any) => api.post<Asset>("/assets", p).then((r) => r.data),
   aiTargets: (limit = 5) => api.post<Asset[]>("/assets/ai-targets", null, { params: { limit } }).then((r) => r.data),
   update: (id: number, p: any) => api.patch<Asset>(`/assets/${id}`, p).then((r) => r.data),
@@ -541,6 +580,8 @@ export const Quotes = {
     api.get<Quote>(`/quotes/asset/${id}`, { params: { days } }).then((r) => r.data),
   snapshot: (id: number) =>
     api.get<Snapshot>(`/quotes/asset/${id}/snapshot`).then((r) => r.data),
+  fundamentals: (id: number) =>
+    api.get<AssetFundamentals>(`/quotes/asset/${id}/fundamentals`).then((r) => r.data),
   raw: (params: { code: string; asset_type: AssetType; market: Market; days?: number }) =>
     api.get("/quotes/raw", { params }).then((r) => r.data),
 };

@@ -1,12 +1,14 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 import {
-  AlertTriangle, BrainCircuit, CalendarClock, CheckCircle2, ListTodo, RefreshCw, Wallet, XCircle,
+  AlertTriangle, BrainCircuit, CalendarClock, CheckCircle2, Eye, ListTodo, RefreshCw, Wallet, XCircle,
 } from "lucide-react";
 
 import PageHeader from "../components/PageHeader";
-import { BudgetStatusItem, TodoApi, TodoItem } from "../api/client";
+import AssetFundamentalsPanel from "../components/AssetFundamentalsPanel";
+import { BudgetStatusItem, Quotes, TodoApi, TodoItem } from "../api/client";
 import { fmtDateTime, fmtMoney, fmtNum } from "../lib/format";
 
 type StatusFilter = "pending" | "accepted" | "rejected" | "all";
@@ -98,7 +100,7 @@ export default function Todos() {
       </div>
 
       {todos.isLoading ? (
-        <div className="card p-12 text-center text-muted">加载中…</div>
+        <div className="card p-12 text-center text-muted">正在加载建议列表… 页面会在拿到部分数据后立即显示。</div>
       ) : items.length === 0 ? (
         <div className="card p-12 text-center text-muted">
           <ListTodo className="w-8 h-8 mx-auto mb-3 text-muted/60" />
@@ -173,6 +175,12 @@ function TodoCard({ todo, busy, onAccept, onReject }: {
   const canAccept = todo.status === "pending" && price > 0 && shares > 0;
   const isDca = todo.todo_type === "dca_due";
   const isAiInvestment = todo.todo_type === "ai_investment";
+  const fundamentals = useQuery({
+    queryKey: ["fundamentals", todo.asset_id, "todo"],
+    queryFn: () => Quotes.fundamentals(todo.asset_id!),
+    enabled: isAiInvestment && !!todo.asset_id,
+    staleTime: 10 * 60_000,
+  });
   const platform = String(todo.payload?.platform || txn.platform || "");
   const currency = String(todo.payload?.currency || txn.currency || "");
   const assetTypeLabel = assetTypeLabelOf(String(todo.payload?.asset_type || todo.asset?.asset_type || ""));
@@ -195,6 +203,11 @@ function TodoCard({ todo, busy, onAccept, onReject }: {
                 <span className="inline-flex items-center gap-1">
                   <Wallet className="w-3 h-3" /> {todo.asset?.name || (todo.asset_id ? `资产 #${todo.asset_id}` : "未绑定资产")}
                 </span>
+                {todo.asset_id && (
+                  <Link to={`/assets/${todo.asset_id}`} className="text-accent-soft hover:text-white inline-flex items-center gap-1">
+                    <Eye className="w-3 h-3" /> 详情/基本盘
+                  </Link>
+                )}
                 <span>生成：{fmtDateTime(todo.due_date || todo.created_at)}</span>
                 {todo.expires_at && todo.status === "pending" && <span className="text-amber2">过期：{fmtDateTime(todo.expires_at)}</span>}
                 {todo.resolved_at && <span>处理：{fmtDateTime(todo.resolved_at)}</span>}
@@ -212,6 +225,12 @@ function TodoCard({ todo, busy, onAccept, onReject }: {
               <InfoCell label="建议金额" value={fmtMoney(Number(suggestion.suggest_amount || txn.amount || 0), currency || "CNY")} />
               <InfoCell label="资产类型" value={assetTypeLabel || "—"} />
               <InfoCell label="估算净值" value={price > 0 ? fmtNum(price, 4) : "—"} />
+            </div>
+          )}
+
+          {isAiInvestment && todo.asset_id && (
+            <div className="mt-4">
+              <AssetFundamentalsPanel data={fundamentals.data} loading={fundamentals.isLoading} compact />
             </div>
           )}
 

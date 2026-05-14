@@ -186,6 +186,43 @@ def get_asset(
     return asset
 
 
+@router.get("/{asset_id}/summary")
+async def get_holding_summary(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """单资产持仓汇总：用于前端逐个资产渐进补行情，避免整页等待全量汇总。"""
+    asset = db.query(models.Asset).filter_by(id=asset_id, user_id=current_user.id).first()
+    if not asset:
+        raise HTTPException(404, "asset not found")
+    quote_sources = settings_service.get(db, "quote_sources", user_id=current_user.id) or {}
+    try:
+        current = await quotes_service.fetch_current_price_cached(
+            asset.asset_type.value, asset.market.value, asset.code,
+            quote_sources=quote_sources,
+        )
+    except Exception:
+        current = None
+    h = holding_service.summarize(asset, current)
+    return {
+        "asset": {
+            "id": asset.id, "name": asset.name, "code": asset.code,
+            "asset_type": asset.asset_type.value, "market": asset.market.value,
+            "platform": asset.platform, "watch_only": asset.watch_only,
+            "target_source": asset.target_source or "manual",
+            "note": asset.note,
+            "yield_7d": asset.yield_7d,
+            "expected_apr": asset.expected_apr,
+            "start_date": asset.start_date.isoformat() if asset.start_date else None,
+            "maturity_date": asset.maturity_date.isoformat() if asset.maturity_date else None,
+            "principal_amount": asset.principal_amount,
+            "is_principal_guaranteed": asset.is_principal_guaranteed,
+        },
+        **h,
+    }
+
+
 @router.patch("/{asset_id}", response_model=schemas.AssetOut)
 def update_asset(
     asset_id: int,

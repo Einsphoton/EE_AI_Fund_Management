@@ -4,7 +4,7 @@ import {
   BrainCircuit, RefreshCw, ChevronDown, ChevronRight, Clock,
   TrendingUp, TrendingDown, Minus, Check, Zap,
   LayoutList, LayoutGrid, PanelsTopLeft, Sparkles,
-  Play, Square, Terminal,
+  Play, Square, Terminal, Target,
 } from "lucide-react";
 
 import PageHeader from "../components/PageHeader";
@@ -73,8 +73,14 @@ export default function Advice() {
   const advices = useQuery({
     queryKey: ["advice", "recent", "batch"],
     queryFn: () => AdviceApi.recent(300, "batch"),
+    staleTime: 2 * 60_000,
   });
-  const holdings = useQuery({ queryKey: ["holdings"], queryFn: Assets.holdings });
+  const assets = useQuery({
+    queryKey: ["assets"],
+    queryFn: Assets.list,
+    staleTime: 10 * 60_000,
+    refetchOnWindowFocus: false,
+  });
 
   const [filter, setFilter] = useState<FilterAction>("all");
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -90,9 +96,14 @@ export default function Advice() {
     try { localStorage.setItem(VIEW_STORAGE_KEY, v); } catch {}
   };
 
+  const assetOf = (id: number | null) => (id ? assets.data?.find((a) => a.id === id) : undefined);
   const nameOf = (id: number | null) => {
     if (!id) return "—";
-    return holdings.data?.find((h) => h.asset.id === id)?.asset.name || `#${id}`;
+    return assetOf(id)?.name || `#${id}`;
+  };
+  const targetOf = (id: number | null) => {
+    const a = assetOf(id);
+    return !!a && (a.watch_only || (a.target_source || "").toLowerCase() === "ai");
   };
 
   const groups = useMemo(() => {
@@ -154,6 +165,13 @@ export default function Advice() {
 
       {/* ---- 嵌入式分析任务面板（有任务就出现，不阻断页面） ---- */}
       {task.started && <EmbeddedTaskPanel />}
+
+      {(advices.isLoading || assets.isLoading || assets.isFetching) && (
+        <div className="card p-3 mb-4 text-xs text-muted flex items-center justify-between gap-3">
+          <span>{advices.isLoading ? "正在加载历史分析批次…" : "分析结果已先显示，正在补全资产名称和标的标识…"}</span>
+          <span className="text-accent-soft">已显示 {shownCount} 条分析</span>
+        </div>
+      )}
 
       {/* ---- 工具条 ---- */}
       <div className="card p-3 mb-4 flex flex-wrap items-center gap-2">
@@ -217,10 +235,11 @@ export default function Advice() {
           expanded={expanded}
           toggle={toggle}
           nameOf={nameOf}
+          targetOf={targetOf}
           onAsset={openAsset}
         />
       ) : viewMode === "card" ? (
-        <CardView groups={groups} nameOf={nameOf} onAsset={openAsset} />
+        <CardView groups={groups} nameOf={nameOf} targetOf={targetOf} onAsset={openAsset} />
       ) : (
         <SplitView
           groups={groups}
@@ -228,6 +247,7 @@ export default function Advice() {
           onSelect={setSelectedBatch}
           selectedGroup={selectedGroup}
           nameOf={nameOf}
+          targetOf={targetOf}
           onAsset={openAsset}
         />
       )}
@@ -458,11 +478,12 @@ function hhmmss(ts: number): string {
 // ===========================================================================
 //  视图 A: 列表
 // ===========================================================================
-function ListView({ groups, expanded, toggle, nameOf, onAsset }: {
+function ListView({ groups, expanded, toggle, nameOf, targetOf, onAsset }: {
   groups: BatchGroup[];
   expanded: Record<string, boolean>;
   toggle: (k: string) => void;
   nameOf: (id: number | null) => string;
+  targetOf: (id: number | null) => boolean;
   onAsset: (id: number | null) => void;
 }) {
   return (
@@ -494,7 +515,7 @@ function ListView({ groups, expanded, toggle, nameOf, onAsset }: {
             {open && (
               <div className="border-t border-line/40 divide-y divide-line/30">
                 {g.items.map((a) => (
-                  <AdviceRow key={a.id} a={a} nameOf={nameOf} onAsset={onAsset} />
+                  <AdviceRow key={a.id} a={a} nameOf={nameOf} targetOf={targetOf} onAsset={onAsset} />
                 ))}
               </div>
             )}
@@ -508,9 +529,10 @@ function ListView({ groups, expanded, toggle, nameOf, onAsset }: {
 // ===========================================================================
 //  视图 B: 卡片流
 // ===========================================================================
-function CardView({ groups, nameOf, onAsset }: {
+function CardView({ groups, nameOf, targetOf, onAsset }: {
   groups: BatchGroup[];
   nameOf: (id: number | null) => string;
+  targetOf: (id: number | null) => boolean;
   onAsset: (id: number | null) => void;
 }) {
   return (
@@ -529,7 +551,7 @@ function CardView({ groups, nameOf, onAsset }: {
           </div>
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {g.items.map((a) => (
-              <AdviceMiniCard key={a.id} a={a} nameOf={nameOf} onAsset={onAsset} />
+              <AdviceMiniCard key={a.id} a={a} nameOf={nameOf} targetOf={targetOf} onAsset={onAsset} />
             ))}
           </div>
         </div>
@@ -541,12 +563,13 @@ function CardView({ groups, nameOf, onAsset }: {
 // ===========================================================================
 //  视图 C: 双栏
 // ===========================================================================
-function SplitView({ groups, selectedBatch, onSelect, selectedGroup, nameOf, onAsset }: {
+function SplitView({ groups, selectedBatch, onSelect, selectedGroup, nameOf, targetOf, onAsset }: {
   groups: BatchGroup[];
   selectedBatch: string | null;
   onSelect: (id: string) => void;
   selectedGroup: BatchGroup | undefined;
   nameOf: (id: number | null) => string;
+  targetOf: (id: number | null) => boolean;
   onAsset: (id: number | null) => void;
 }) {
   return (
@@ -602,7 +625,7 @@ function SplitView({ groups, selectedBatch, onSelect, selectedGroup, nameOf, onA
             </div>
             <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
               {selectedGroup.items.map((a) => (
-                <AdviceMiniCard key={a.id} a={a} nameOf={nameOf} onAsset={onAsset} />
+                <AdviceMiniCard key={a.id} a={a} nameOf={nameOf} targetOf={targetOf} onAsset={onAsset} />
               ))}
             </div>
           </>
@@ -623,6 +646,18 @@ function profileName(a: AdviceT): string {
   if (!profile) return "";
   if (typeof profile === "string") return profile;
   return profile.name || "";
+}
+
+function TargetBadge({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border border-accent/60 bg-accent/20 text-accent-soft shadow-glow ${compact ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-[11px]"}`}
+      title="来自我的标的 / 观察池，尚不属于实质持仓资产"
+    >
+      <Target className="w-3 h-3" />
+      {!compact && <span>我的标的</span>}
+    </span>
+  );
 }
 
 function BatchStats({ stats, count }: { stats: BatchGroup["stats"]; count: number }) {
@@ -651,13 +686,15 @@ function BatchStats({ stats, count }: { stats: BatchGroup["stats"]; count: numbe
   );
 }
 
-function AdviceRow({ a, nameOf, onAsset }: {
+function AdviceRow({ a, nameOf, targetOf, onAsset }: {
   a: AdviceT;
   nameOf: (id: number | null) => string;
+  targetOf: (id: number | null) => boolean;
   onAsset: (id: number | null) => void;
 }) {
   const [showDetail, setShowDetail] = useState(false);
   const profile = profileName(a);
+  const isTarget = targetOf(a.asset_id);
   return (
     <div className="px-4 py-3 hover:bg-line/10 transition">
       <div className="flex items-start gap-3">
@@ -671,6 +708,7 @@ function AdviceRow({ a, nameOf, onAsset }: {
             >
               {nameOf(a.asset_id)}
             </button>
+            {isTarget && <TargetBadge />}
             <span className={`text-xs font-semibold ${actionColor(a.action)}`}>
               {actionLabel(a.action)}
             </span>
@@ -731,12 +769,14 @@ function AdviceRow({ a, nameOf, onAsset }: {
   );
 }
 
-function AdviceMiniCard({ a, nameOf, onAsset }: {
+function AdviceMiniCard({ a, nameOf, targetOf, onAsset }: {
   a: AdviceT;
   nameOf: (id: number | null) => string;
+  targetOf: (id: number | null) => boolean;
   onAsset: (id: number | null) => void;
 }) {
   const profile = profileName(a);
+  const isTarget = targetOf(a.asset_id);
   const actionCls =
     a.action === "buy" ? "bg-emerald2/10 border-emerald2/30"
       : a.action === "sell" ? "bg-rose2/10 border-rose2/30"
@@ -750,7 +790,7 @@ function AdviceMiniCard({ a, nameOf, onAsset }: {
         <div className="flex-1 min-w-0">
           <div className="font-medium truncate flex items-center gap-1">
             {nameOf(a.asset_id)}
-            <Sparkles className="w-3 h-3 text-accent opacity-60" />
+            {isTarget ? <TargetBadge compact /> : <Sparkles className="w-3 h-3 text-accent opacity-60" />}
           </div>
           <div className="text-[10px] text-muted font-mono mt-0.5">
             {fmtTime(a.created_at)}

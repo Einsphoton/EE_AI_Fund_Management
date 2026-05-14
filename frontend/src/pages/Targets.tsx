@@ -50,7 +50,13 @@ function buildTargetGroups(targets: Asset[], groupMode: GroupMode): TargetGroup[
 
 export default function Targets() {
   const qc = useQueryClient();
-  const { data: assets = [] } = useQuery({ queryKey: ["assets"], queryFn: AssetApi.list });
+  const assetsQuery = useQuery({
+    queryKey: ["assets"],
+    queryFn: AssetApi.list,
+    staleTime: 10 * 60_000,
+    refetchOnWindowFocus: false,
+  });
+  const assets = assetsQuery.data || [];
   const targets = assets.filter((a) => a.watch_only);
 
   const [groupMode, setGroupMode] = useState<GroupMode>("asset_type");
@@ -150,7 +156,14 @@ export default function Targets() {
         }
       />
 
-      {targets.length === 0 ? (
+      {(assetsQuery.isLoading || assetsQuery.isFetching) && (
+        <div className="card p-3 mb-4 text-xs text-muted flex items-center justify-between gap-3">
+          <span>{assetsQuery.isLoading ? "正在加载标的清单…" : "标的已先显示，正在后台刷新最新清单…"}</span>
+          <span className="text-accent-soft">已显示 {targets.length} 个标的</span>
+        </div>
+      )}
+
+      {targets.length === 0 && !assetsQuery.isLoading ? (
         <div className="card p-12 text-center text-muted">
           <Target className="w-8 h-8 mx-auto mb-3 text-muted/60" />
           还没有观察标的。可以手动添加，或点击右上角让 AI 更新推荐。
