@@ -223,8 +223,10 @@ def get_all(db: Session, user_id: int | None = None) -> dict[str, Any]:
         prefix = f"u:{uid}:"
         rows = db.query(models.AppSetting).filter(models.AppSetting.key.startswith(prefix)).all()
         for row in rows:
-            out[row.key[len(prefix):]] = row.value
+            raw_key = row.key[len(prefix):]
+            out[raw_key] = _with_defaults(raw_key, row.value)
         return out
+
     for row in db.query(models.AppSetting).all():
         if not str(row.key).startswith("u:"):
             out[row.key] = _with_defaults(row.key, row.value)

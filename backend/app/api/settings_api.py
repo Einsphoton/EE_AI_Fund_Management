@@ -92,8 +92,9 @@ def put_setting(
     settings_service.set_value(db, key, payload.value, user_id=current_user.id)
 
     if key == "schedule":
-        cron = scheduler_mod.reload_schedule()
+        cron = scheduler_mod.reload_schedule(current_user.id)
         return {"ok": True, "applied_cron": cron}
+
     return {"ok": True}
 
 
