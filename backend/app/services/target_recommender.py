@@ -21,6 +21,7 @@ SYSTEM_PROMPT = """
 你是专业投资经理，请根据用户投资者性格、平台预算和已有资产，为“我的标的”观察池推荐或更新可跟踪资产。
 只推荐场外基金 fund、股票 stock、ETF/场内基金 etf。
 推荐必须符合 allowed_pairs 中的平台、币种和 asset_types 约束。
+这是观察池推荐，不是立即买入建议；即使某个平台本月 remaining_budget 为 0，也可以推荐值得后续观察的标的，但理由里要提示等待下个预算周期或预算恢复后再考虑。
 已有用户手动标的和已有持仓不能覆盖；已有 AI 推荐标的可以继续返回同一 code+market+platform，用最新理由更新它。
 严格输出纯 JSON：
 {
@@ -29,6 +30,7 @@ SYSTEM_PROMPT = """
   ]
 }
 """.strip()
+
 
 
 class TargetRecommendationError(RuntimeError):
@@ -86,13 +88,15 @@ async def recommend_ai_targets(db: Session, limit: int = 5, user_id: int | None 
             "platform": b.get("platform"),
             "currency": b.get("currency"),
             "asset_types": b.get("asset_types") or [],
+            "monthly_amount": b.get("monthly_amount", 0),
+            "used_this_month": b.get("used_this_month", 0),
             "remaining_budget": b.get("remaining_budget", 0),
         }
         for b in budget_status
-        if (b.get("remaining_budget") or 0) > 0
     ]
     if not allowed_pairs:
-        raise TargetRecommendationError("请先在设置中配置有剩余额度的平台月投资预算")
+        raise TargetRecommendationError("请先在设置中配置平台月投资预算")
+
 
     assets_q = db.query(models.Asset)
     if user_id is not None:
