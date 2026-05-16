@@ -452,8 +452,10 @@ export interface AppSettings {
     force_stream?: boolean;
   };
 
-  schedule: { enabled: boolean; cron: string; preset: string; include_investment_plan?: boolean; include_ai_targets?: boolean };
+  schedule: { enabled: boolean; cron: string; preset: string; include_investment_plan?: boolean; include_ai_targets?: boolean; market_open_only?: boolean; market_open_markets?: string[] };
+
   investment_budget?: { items: InvestmentBudgetItem[] };
+
   quote_sources?: {
     fund_current?: "eastmoney_realtime" | "eastmoney_nav" | string;
     stock_current?: "tencent_realtime" | "kline_close" | string;

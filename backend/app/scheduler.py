@@ -8,8 +8,10 @@ from . import models
 from .database import SessionLocal
 from .services import settings_service
 from .services.investment_manager import run_investment_manager
+from .services.market_calendar import check_markets_trading_today, normalize_markets
 from .services.target_recommender import recommend_ai_targets
 from .agent.analyzer import analyze_all
+
 
 
 _scheduler: AsyncIOScheduler | None = None
@@ -49,7 +51,20 @@ def _active_user_ids(db) -> list[int]:
     return [int(row[0]) for row in rows]
 
 
+def _analysis_markets_for_user(user_id: int | None) -> list[str]:
+    db = SessionLocal()
+    try:
+        q = db.query(models.Asset.market)
+        if user_id is not None:
+            q = q.filter(models.Asset.user_id == user_id)
+        markets = [getattr(row[0], "value", row[0]) for row in q.all()]
+        return normalize_markets(markets)
+    finally:
+        db.close()
+
+
 def _add_or_replace_job(
+
     sch: AsyncIOScheduler,
     *,
     user_id: int | None,
@@ -92,9 +107,23 @@ async def _job_runner(user_id: int | None = None):
         return
 
     label = f"user {user_id}" if user_id is not None else "global"
+    if cfg.get("market_open_only"):
+        markets = cfg.get("market_open_markets") or _analysis_markets_for_user(user_id)
+        market_check = await check_markets_trading_today(markets)
+
+        status_text = ", ".join(
+            f"{s.get('label')}={('开业' if s.get('is_trading_day') else '休市')}({s.get('date')})"
+            for s in market_check.get("markets", [])
+        )
+        if not market_check.get("should_run"):
+            print(f"[scheduler] {label} skipped: no checked market is trading today; {status_text}")
+            return
+        print(f"[scheduler] {label} market-open check passed: {status_text}")
+
     try:
         n = await analyze_all(user_id=user_id)
         print(f"[scheduler] {label} analyzed {n} assets/targets")
+
 
         if cfg.get("include_investment_plan"):
             db = SessionLocal()

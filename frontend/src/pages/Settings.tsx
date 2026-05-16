@@ -140,8 +140,10 @@ export default function SettingsPage() {
 
 
   });
-  const [schedule, setSchedule] = useState<AppSettings["schedule"]>({ enabled: false, cron: "0 9 * * *", preset: "daily", include_investment_plan: false, include_ai_targets: false });
+  const [schedule, setSchedule] = useState<AppSettings["schedule"]>({ enabled: false, cron: "0 9 * * *", preset: "daily", include_investment_plan: false, include_ai_targets: false, market_open_only: false, market_open_markets: ["A", "HK", "US"] });
+
   const [quoteSources, setQuoteSources] = useState<NonNullable<AppSettings["quote_sources"]>>({
+
     fund_current: "eastmoney_realtime",
     stock_current: "tencent_realtime",
     a_stock_kline: "sina",
@@ -282,7 +284,16 @@ export default function SettingsPage() {
     }));
   };
 
+  const selectedMarketOpenMarkets = schedule.market_open_only ? (schedule.market_open_markets ?? ["A", "HK", "US"]) : [];
+  const toggleMarketOpenMarket = (market: string, checked: boolean) => {
+    const current = selectedMarketOpenMarkets.filter(Boolean);
+
+    const next = checked ? Array.from(new Set([...current, market])) : current.filter((m) => m !== market);
+    setSchedule({ ...schedule, market_open_only: next.length > 0, market_open_markets: next });
+  };
+
   return (
+
     <>
       <PageHeader
         title="设置"
@@ -408,7 +419,7 @@ export default function SettingsPage() {
             />
             定时分析后顺带生成 AI 投资建议
           </label>
-          <label className="flex items-center gap-2 cursor-pointer mb-4 select-none">
+          <label className="flex items-center gap-2 cursor-pointer mb-3 select-none">
             <input
               type="checkbox" className="accent-accent w-4 h-4"
               checked={!!schedule.include_ai_targets}
@@ -416,8 +427,43 @@ export default function SettingsPage() {
             />
             定时分析后顺带更新 AI 推荐标的
           </label>
+          <div className="mb-4 rounded-xl border border-line/60 bg-bg-soft/30 p-3">
+            <div className="text-sm mb-1">仅在选中市场交易日运行</div>
+            <div className="text-[11px] text-muted mb-3">
+              可分别限制 A股、港股、美股；触发前会联网查询交易日历。选中多个时，任一市场开业即运行；三个都不选则不启用该限制。
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {([
+                { key: "A", label: "A股开业日" },
+                { key: "HK", label: "港股开业日" },
+                { key: "US", label: "美股开业日" },
+              ]).map((m) => {
+                const active = !!schedule.market_open_only && selectedMarketOpenMarkets.includes(m.key);
+                return (
+                  <label
+                    key={m.key}
+                    className={`px-3 py-1.5 rounded-lg border text-xs cursor-pointer transition select-none ${
+                      active
+                        ? "border-accent/60 bg-accent/15 text-white"
+                        : "border-line text-muted hover:text-white hover:border-accent/40"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      checked={active}
+                      onChange={(e) => toggleMarketOpenMarket(m.key, e.target.checked)}
+                    />
+                    {active && <Check className="w-3 h-3 inline mr-1" />}{m.label}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
 
           <label className="label">频次预设</label>
+
+
           <div className="grid grid-cols-3 gap-2">
             {Object.entries(PRESETS).map(([k, v]) => (
               <button
