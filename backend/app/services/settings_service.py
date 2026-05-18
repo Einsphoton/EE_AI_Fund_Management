@@ -160,11 +160,13 @@ DEFAULTS: dict[str, Any] = {
     },
 
     "investment_budget": {
-
         # 平台月投资额度：[{platform, currency, monthly_amount, asset_types}]
         # asset_types 可包含 fund / stock / etf；同一平台可配置多个币种。
         "items": [],
+        # 清理已用额度时记录时间点；预算已用只统计此时间点之后采纳的 AI 买入建议。
+        "usage_reset_at": None,
     },
+
     "quote_sources": {
         # 基金当前价口径：eastmoney_realtime=天天基金实时估值；eastmoney_nav=官方最新净值
         "fund_current": "eastmoney_realtime",

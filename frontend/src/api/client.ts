@@ -336,7 +336,13 @@ export interface BudgetStatusResponse {
   items: BudgetStatusItem[];
 }
 
+export interface BudgetUsageClearResponse extends BudgetStatusResponse {
+  ok: boolean;
+  usage_reset_at: string;
+}
+
 export interface ChatMsg {
+
   role: "user" | "assistant" | "system";
   content: string;
 }
@@ -770,7 +776,10 @@ export const TodoApi = {
     api.get<TodoItem[]>("/todos", { params: { status } }).then((r) => r.data),
   budgetStatus: () =>
     api.get<BudgetStatusResponse>("/todos/budget-status").then((r) => r.data),
+  clearBudgetUsage: () =>
+    api.post<BudgetUsageClearResponse>("/todos/budget-status/clear").then((r) => r.data),
   runAiInvestmentPlan: () =>
+
     api.post<InvestmentManagerRunResult>("/todos/ai-investment-plan").then((r) => r.data),
   resolve: (id: number, payload: TodoResolvePayload) =>
     api.post<TodoItem>(`/todos/${id}/resolve`, payload).then((r) => r.data),

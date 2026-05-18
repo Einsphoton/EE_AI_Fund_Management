@@ -10,7 +10,8 @@ from .. import models, schemas
 from ..auth import get_current_user
 from ..database import get_db
 
-from ..services.investment_manager import expire_pending_todos, get_budget_status, run_investment_manager
+from ..services.investment_manager import clear_budget_usage, expire_pending_todos, get_budget_status, run_investment_manager
+
 from ..tz import now_local
 
 router = APIRouter(prefix="/api/todos", tags=["todos"])
@@ -26,8 +27,18 @@ def budget_status(
     return {"items": get_budget_status(db, user_id=current_user.id)}
 
 
+@router.post("/budget-status/clear")
+def clear_budget_status(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """清理已使用的月投资额度，不删除交易记录，仅从当前时间重新统计 AI 建议买入。"""
+    result = clear_budget_usage(db, user_id=current_user.id)
+    return {**result, "items": get_budget_status(db, user_id=current_user.id)}
+
 
 @router.post("/ai-investment-plan", response_model=schemas.InvestmentManagerRunOut)
+
 async def run_ai_investment_plan(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
@@ -133,10 +144,15 @@ def resolve_todo(
         fee_rate = float(data.get("fee_rate") or 0)
         fee = round(amount * fee_rate, 2)
     trade_date = payload.trade_date or now_local()
-    note = payload.note or txn_defaults.get("note") or f"To-do确认 · {todo.title}"
+    if todo.todo_type == "ai_investment" and txn_type == models.TxnType.buy:
+        raw_note = payload.note or txn_defaults.get("note") or todo.title
+        note = f"AI投资建议采纳 · {raw_note}"
+    else:
+        note = payload.note or txn_defaults.get("note") or f"To-do确认 · {todo.title}"
 
     txn = models.Transaction(
         asset_id=asset.id,
+
         txn_type=txn_type,
         shares=shares,
         price=price,

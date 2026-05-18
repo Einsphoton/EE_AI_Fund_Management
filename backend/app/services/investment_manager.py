@@ -127,9 +127,45 @@ def _budget_items(db: Session, user_id: int | None = None) -> list[dict[str, Any
     return items
 
 
+_AI_INVESTMENT_ACCEPTED_PREFIX = "AI投资建议采纳"
+_AI_INVESTMENT_LEGACY_MARKER = "AI投资经理建议"
+
+
+def _budget_usage_reset_at(db: Session, user_id: int | None = None) -> datetime | None:
+    cfg = settings_service.get(db, "investment_budget", user_id=user_id) or {}
+    raw = cfg.get("usage_reset_at") if isinstance(cfg, dict) else None
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return datetime.fromisoformat(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def clear_budget_usage(db: Session, user_id: int | None = None) -> dict[str, Any]:
+    now = now_local()
+    cfg = settings_service.get(db, "investment_budget", user_id=user_id) or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg["usage_reset_at"] = now.isoformat()
+    settings_service.set_value(db, "investment_budget", cfg, user_id=user_id)
+    return {"ok": True, "usage_reset_at": cfg["usage_reset_at"]}
+
+
+def _is_ai_investment_budget_txn(txn: models.Transaction) -> bool:
+    note = str(txn.note or "")
+    return note.startswith(_AI_INVESTMENT_ACCEPTED_PREFIX) or _AI_INVESTMENT_LEGACY_MARKER in note
+
+
 def _spent_this_month(db: Session, budgets: list[dict[str, Any]], user_id: int | None = None) -> dict[tuple[str, str, str], float]:
 
     start = _month_start(now_local())
+    reset_at = _budget_usage_reset_at(db, user_id=user_id)
+    if reset_at is not None and reset_at > start:
+        start = reset_at
+
     keys = {
         (b["platform"], b["currency"], asset_type)
         for b in budgets
@@ -147,10 +183,13 @@ def _spent_this_month(db: Session, budgets: list[dict[str, Any]], user_id: int |
     txns = q.all()
 
     for t in txns:
+        if not _is_ai_investment_budget_txn(t):
+            continue
         asset = t.asset
         if not asset:
             continue
         asset_type = getattr(asset.asset_type, "value", asset.asset_type)
+
         key = (asset.platform or "", _currency_for(asset), str(asset_type))
         if key not in spent:
             continue

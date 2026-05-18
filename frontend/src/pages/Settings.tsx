@@ -12,7 +12,8 @@ import toast from "react-hot-toast";
 
 import PageHeader from "../components/PageHeader";
 import LLMConfigCard, { LLMPreset, LLMConfigState } from "../components/LLMConfigCard";
-import { Settings as SettingsApi, AppSettings, Admin, ImportResult, InvestmentBudgetItem, AssetType, UpdateApi, AIProviderConfig } from "../api/client";
+import { Settings as SettingsApi, AppSettings, Admin, ImportResult, InvestmentBudgetItem, AssetType, UpdateApi, AIProviderConfig, TodoApi } from "../api/client";
+
 
 
 
@@ -234,6 +235,17 @@ export default function SettingsPage() {
     },
     onError: (e: any) => toast.error(e.message),
   });
+
+  const clearBudgetUsage = useMutation({
+    mutationFn: TodoApi.clearBudgetUsage,
+    onSuccess: () => {
+      toast.success("已清理本月已使用额度，将从现在开始重新统计 AI 建议买入");
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      qc.invalidateQueries({ queryKey: ["todos", "budget-status"] });
+    },
+    onError: (e: any) => toast.error(e?.message || "清理已使用额度失败"),
+  });
+
 
   // ---- LLMConfigCard 双向绑定的 helper ----
   // AI 卡片维护完整状态（含 CF / profile / report_style），但 LLMConfigCard 只接它认识的字段子集
@@ -485,7 +497,17 @@ export default function SettingsPage() {
         </div>
 
         {/* ============ 平台月投资额度 ============ */}
-        <BudgetSettingsCard items={budgetItems} onChange={setBudgetItems} />
+        <BudgetSettingsCard
+          items={budgetItems}
+          onChange={setBudgetItems}
+          clearing={clearBudgetUsage.isPending}
+          onClearUsage={() => {
+            if (window.confirm("确认清理已使用的月投资额度？不会删除交易记录，只会从现在开始重新统计 AI 投资建议买入。")) {
+              clearBudgetUsage.mutate();
+            }
+          }}
+        />
+
 
         {/* ============ 基金股票数据源 ============ */}
         <QuoteSourceCard value={quoteSources} onChange={setQuoteSources} />
@@ -740,10 +762,13 @@ function QuoteSourceCard({ value, onChange }: {
   );
 }
 
-function BudgetSettingsCard({ items, onChange }: {
+function BudgetSettingsCard({ items, onChange, onClearUsage, clearing }: {
   items: InvestmentBudgetItem[];
   onChange: (items: InvestmentBudgetItem[]) => void;
+  onClearUsage: () => void;
+  clearing: boolean;
 }) {
+
 
   const add = () => onChange([...items, { platform: "", currency: "CNY", monthly_amount: 1000, asset_types: ["fund"] }]);
   const update = (idx: number, patch: Partial<InvestmentBudgetItem>) => {
@@ -768,13 +793,29 @@ function BudgetSettingsCard({ items, onChange }: {
             按购买平台、币种和可购买资产类型设置每月可投入预算。同一平台可添加多个币种，例如富途 HKD 2000 + USD 2000。
           </p>
         </div>
-        <button className="btn !px-3 !py-1.5 text-xs" onClick={add} type="button">
-          <Plus className="w-3.5 h-3.5" /> 添加预算
-        </button>
+        <div className="flex flex-wrap gap-2 justify-end">
+          <button
+            className="btn !px-3 !py-1.5 text-xs"
+            onClick={onClearUsage}
+            type="button"
+            disabled={clearing}
+          >
+            {clearing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            清理已用额度
+          </button>
+          <button className="btn !px-3 !py-1.5 text-xs" onClick={add} type="button">
+            <Plus className="w-3.5 h-3.5" /> 添加预算
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-[11px] text-muted leading-relaxed mb-3">
+        已用额度只统计「AI 投资建议」被采纳后产生的买入交易；手动录入、OCR 导入和普通交易不会扣减月投资额度。
       </div>
 
       {items.length === 0 ? (
         <div className="rounded-xl border border-dashed border-line p-5 text-center text-sm text-muted">
+
           暂未设置预算。AI 投资经理需要预算后才会生成可执行投资建议。
         </div>
       ) : (
